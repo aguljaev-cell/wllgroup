@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from PySide6.QtCore import QObject, Signal, Slot
 
-from .config import AppConfig
-from .model_runtime import LocalModelServer, download_model, model_installed
-from .processors import translate_docx, translate_pdf
+from config import AppConfig
+from model_runtime import LocalModelServer, download_model, model_installed
+from processors import translate_docx, translate_pdf
 
 
 class SetupWorker(QObject):
@@ -21,7 +22,7 @@ class SetupWorker(QObject):
     def run(self) -> None:
         try:
             if not model_installed(self.config):
-                download_model(self.config, lambda v, m: self.progress.emit(v, m))
+                download_model(self.config, lambda value, message: self.progress.emit(value, message))
             self.finished.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -29,7 +30,7 @@ class SetupWorker(QObject):
 
 class TranslationWorker(QObject):
     progress = Signal(int, str)
-    finished = Signal(str)
+    finished = Signal(str, str)
     failed = Signal(str)
 
     def __init__(self, source: Path, destination: Path, config: AppConfig):
@@ -42,17 +43,20 @@ class TranslationWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            self.server.start(lambda v, m: self.progress.emit(min(v, 10), m))
+            self.server.start(lambda value, message: self.progress.emit(min(value, 10), message))
+
             def mapped(value: int, message: str) -> None:
                 self.progress.emit(10 + int(value * 0.9), message)
+
             suffix = self.source.suffix.lower()
             if suffix == ".pdf":
-                translate_pdf(self.source, self.destination, self.config, mapped)
+                report = translate_pdf(self.source, self.destination, self.config, mapped)
             elif suffix == ".docx":
-                translate_docx(self.source, self.destination, self.config, mapped)
+                report = translate_docx(self.source, self.destination, self.config, mapped)
             else:
                 raise ValueError("Поддерживаются только PDF и DOCX")
-            self.finished.emit(str(self.destination))
+
+            self.finished.emit(str(self.destination), str(report))
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:

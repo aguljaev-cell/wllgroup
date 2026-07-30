@@ -5,7 +5,7 @@ from pathlib import Path
 import os
 
 APP_NAME = "PDFMathTranslate WLL"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 
 def app_data_dir() -> Path:
@@ -15,7 +15,7 @@ def app_data_dir() -> Path:
     return path
 
 
-@dataclass
+@dataclass(slots=True)
 class AppConfig:
     model_url: str = (
         "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/"
@@ -25,7 +25,8 @@ class AppConfig:
     server_host: str = "127.0.0.1"
     server_port: int = 8091
     context_size: int = 8192
-    temperature: float = 0.1
+    temperature: float = 0.05
+    request_timeout: int = 900
 
     @property
     def model_path(self) -> Path:

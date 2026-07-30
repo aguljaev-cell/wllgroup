@@ -2,12 +2,13 @@
 from pathlib import Path
 
 root = Path(SPECPATH)
+
 a = Analysis(
     ['run.py'],
     pathex=[str(root)],
     binaries=[],
     datas=[(str(root / 'vendor' / 'llama'), 'vendor/llama')],
-    hiddenimports=['fitz', 'docx'],
+    hiddenimports=['fitz', 'docx', 'requests'],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
