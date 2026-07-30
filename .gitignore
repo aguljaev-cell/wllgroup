@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+build-temp/
+dist/
+release/*.exe
+models/*.gguf
