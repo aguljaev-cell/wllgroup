@@ -1,0 +1,67 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Build llama.cpp runtime
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch b6031 https://github.com/ggerganov/llama.cpp.git llama.cpp
+          cmake -S llama.cpp -B llama.cpp/build -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF
+          cmake --build llama.cpp/build --config Release --target llama-server -j 2
+          New-Item -ItemType Directory -Force vendor/llama | Out-Null
+          $server = Get-ChildItem llama.cpp/build -Recurse -Filter llama-server.exe | Select-Object -First 1
+          if (-not $server) { throw 'llama-server.exe not found' }
+          Copy-Item $server.FullName vendor/llama/llama-server.exe
+          Get-ChildItem $server.Directory.FullName -Filter '*.dll' | Copy-Item -Destination vendor/llama -Force
+
+      - name: Run syntax checks
+        run: python -m compileall -q app run.py
+
+      - name: Build application
+        run: pyinstaller --noconfirm --clean PDFMathTranslate_WLL.spec
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" build\installer.iss'
+
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem release\PDFMathTranslate_WLL_Setup_v0_3.exe
+          (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower() + "  " + $file.Name | Out-File release\SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFMathTranslate_WLL_Windows_v0_3
+          path: |
+            release/PDFMathTranslate_WLL_Setup_v0_3.exe
+            release/SHA256SUMS.txt
+          retention-days: 14
