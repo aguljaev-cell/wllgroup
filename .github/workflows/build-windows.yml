@@ -64,7 +64,17 @@ jobs:
             $content = $content.Replace('from app.', 'from ')
             $content = $content.Replace('import app.', 'import ')
 
+            $content = $content -replace '(?m)^(\s*)from\s+\.(\w+)\s+import\s+', '$1from $2 import '
+            $content = $content -replace '(?m)^(\s*)from\s+\.\s+import\s+(\w+)', '$1import $2'
+            $content = $content -replace '(?m)^(\s*)import\s+\.(\w+)', '$1import $2'
+
             Set-Content -Path $file -Value $content -Encoding UTF8
+          }
+
+          $remaining = Select-String -Path *.py -Pattern '^\s*(from|import)\s+\.' -AllMatches
+          if ($remaining) {
+            $remaining | ForEach-Object { Write-Host $_.Line }
+            throw 'Relative imports remain after adaptation'
           }
 
       - name: Set up Python
@@ -120,7 +130,7 @@ jobs:
             Copy-Item `
               -Destination vendor/llama `
               -Force
-              
+
       - name: Run syntax checks
         shell: pwsh
         run: |
@@ -164,7 +174,7 @@ jobs:
 
           @'
           #define MyAppName "PDFMathTranslate WLL"
-          #define MyAppVersion "0.3.2"
+          #define MyAppVersion "0.3.3"
           #define MyAppPublisher "WorldLogicLine"
           #define MyAppExeName "PDFMathTranslate_WLL.exe"
 
@@ -176,7 +186,7 @@ jobs:
           DefaultDirName={localappdata}\Programs\PDFMathTranslate WLL
           DefaultGroupName={#MyAppName}
           OutputDir=..\release
-          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_3_2
+          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_3_3
           Compression=lzma2/ultra64
           SolidCompression=yes
           WizardStyle=modern
@@ -211,7 +221,7 @@ jobs:
         shell: pwsh
         run: |
           $file = Get-Item `
-            release/PDFMathTranslate_WLL_Setup_v0_3_2.exe
+            release/PDFMathTranslate_WLL_Setup_v0_3_3.exe
 
           $hash = (
             Get-FileHash `
@@ -227,8 +237,8 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: PDFMathTranslate_WLL_Windows_v0_3_2
+          name: PDFMathTranslate_WLL_Windows_v0_3_3
           path: |
-            release/PDFMathTranslate_WLL_Setup_v0_3_2.exe
+            release/PDFMathTranslate_WLL_Setup_v0_3_3.exe
             release/SHA256SUMS.txt
           retention-days: 14
