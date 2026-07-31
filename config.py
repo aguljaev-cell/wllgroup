@@ -1,12 +1,9 @@
-from __future__ import annotations
-
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
 
 APP_NAME = "PDFMathTranslate WLL"
-APP_VERSION = "0.4.6"
+APP_VERSION = "0.4.7"
 ORGANIZATION_NAME = "WorldLogicLine"
 
 
@@ -59,27 +56,40 @@ def _default_threads() -> int:
 
 @dataclass(slots=True)
 class AppConfig:
+    # ==========================
+    # Модель Qwen 2.5 7B GGUF
+    # ==========================
     model_url: str = (
-        "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/"
-        "qwen2.5-7b-instruct-q4_k_m.gguf"
+        "https://huggingface.co/bartowski/"
+        "Qwen2.5-7B-Instruct-GGUF/resolve/main/"
+        "Qwen2.5-7B-Instruct-Q4_K_M.gguf?download=true"
     )
-    model_filename: str = "qwen2.5-7b-instruct-q4_k_m.gguf"
 
-    # Можно указать точный размер и SHA-256 модели.
-    # Если оставить None, будет выполнена базовая проверка размера файла.
+    model_filename: str = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+
+    # При необходимости можно указать размер и SHA256
     model_size: int | None = None
     model_sha256: str | None = None
 
+    # ==========================
+    # Сервер локальной модели
+    # ==========================
     server_host: str = "127.0.0.1"
     server_port: int = 8091
 
-    # Параметры локальной модели.
+    # ==========================
+    # Параметры llama.cpp
+    # ==========================
     context_size: int = 8192
     batch_size: int = 256
     threads: int = 0
+
+    # На NVIDIA оставляем 99
     gpu_layers: int = 99
 
-    # Параметры перевода.
+    # ==========================
+    # Параметры перевода
+    # ==========================
     temperature: float = 0.05
     request_timeout: int = 900
 
