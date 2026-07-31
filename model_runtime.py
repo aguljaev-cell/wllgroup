@@ -28,9 +28,14 @@ def resource_path(relative: str) -> Path:
     return root / relative
 
 
-def llama_server_path() -> Path:
+def llama_server_candidates() -> list[tuple[str, Path, int]]:
+    """Возвращает движки в порядке предпочтения: Vulkan, затем CPU."""
     name = "llama-server.exe" if os.name == "nt" else "llama-server"
-    return resource_path(f"vendor/llama/{name}")
+    candidates = [
+        ("Vulkan GPU", resource_path(f"vendor/llama/vulkan/{name}"), 99),
+        ("CPU", resource_path(f"vendor/llama/cpu/{name}"), 0),
+    ]
+    return [(label, path, layers) for label, path, layers in candidates if path.exists()]
 
 
 def model_installed(config: AppConfig) -> bool:
@@ -325,10 +330,10 @@ class LocalModelServer:
             self._owns_process = False
             return
 
-        executable = llama_server_path()
-        if not executable.exists():
+        runtimes = llama_server_candidates()
+        if not runtimes:
             raise RuntimeError(
-                f"В сборке отсутствует локальный движок: {executable}"
+                "В сборке отсутствуют локальные движки Vulkan и CPU"
             )
 
         if not model_installed(self.config):
@@ -343,19 +348,14 @@ class LocalModelServer:
                 "Закройте её или измените порт локальной модели."
             )
 
-        gpu_layers = int(getattr(self.config, "gpu_layers", 99))
-        attempts = [
-            (gpu_layers, "Запуск модели с использованием видеокарты…"),
-        ]
-
-        if gpu_layers != 0:
-            attempts.append(
-                (0, "Запуск модели в режиме центрального процессора…")
-            )
-
         last_reason = ""
 
-        for layers, message in attempts:
+        for runtime_label, executable, layers in runtimes:
+            message = (
+                "Запуск модели через видеокарту (Vulkan)…"
+                if layers > 0
+                else "Vulkan недоступен. Запуск модели на процессоре…"
+            )
             progress(0, message)
             args = self._base_args(executable, layers)
             self._start_process(args)
