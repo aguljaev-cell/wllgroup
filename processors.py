@@ -18,7 +18,7 @@ from translator import qa_text, should_translate, translate_text
 
 Progress = Callable[[float, str], None]
 
-_CHECKPOINT_SCHEMA = 1
+_CHECKPOINT_SCHEMA = 2
 
 
 @dataclass(slots=True)
@@ -426,30 +426,54 @@ def _save_checkpoint(
     next_page_index: int,
     warnings: list[str],
     processed_blocks: int,
-) -> None:
+) -> fitz.Document:
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial_tmp = partial.with_name(partial.stem + "-tmp.pdf")
     state_tmp = state_path.with_name(state_path.name + ".tmp")
     partial_tmp.unlink(missing_ok=True)
     state_tmp.unlink(missing_ok=True)
 
-    doc.save(str(partial_tmp), garbage=3, deflate=True, clean=False)
-    os.replace(partial_tmp, partial)
+    reopened: fitz.Document | None = None
+    try:
+        doc.save(str(partial_tmp), garbage=3, deflate=True, clean=False)
 
-    payload = {
-        "schema": _CHECKPOINT_SCHEMA,
-        "source": _source_signature(source),
-        "start_index": start_index,
-        "end_index": end_index,
-        "next_page_index": next_page_index,
-        "warnings": warnings,
-        "processed_blocks": processed_blocks,
-    }
-    state_tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    os.replace(state_tmp, state_path)
+        # garbage=3 reorganises the PDF xref table.  Continuing to edit the
+        # old in-memory document can leave page resources pointing at the old
+        # object numbers ("object out of range" on the next page).  Validate
+        # and reopen the exact checkpoint bytes before processing continues.
+        reopened = fitz.open(stream=partial_tmp.read_bytes(), filetype="pdf")
+        if reopened.page_count != doc.page_count:
+            raise RuntimeError("контрольная копия PDF содержит неверное число страниц")
+
+        os.replace(partial_tmp, partial)
+
+        payload = {
+            "schema": _CHECKPOINT_SCHEMA,
+            "source": _source_signature(source),
+            "start_index": start_index,
+            "end_index": end_index,
+            "next_page_index": next_page_index,
+            "warnings": warnings,
+            "processed_blocks": processed_blocks,
+        }
+        state_tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(state_tmp, state_path)
+        return reopened
+    except Exception:
+        if reopened is not None:
+            reopened.close()
+        partial_tmp.unlink(missing_ok=True)
+        state_tmp.unlink(missing_ok=True)
+        raise
+
+
+def _continue_from_checkpoint(doc: fitz.Document, checkpoint: fitz.Document) -> fitz.Document:
+    """Close the pre-save document only after its checkpoint was validated."""
+    doc.close()
+    return checkpoint
 
 
 def _save_final_pdf(doc: fitz.Document, destination: Path) -> None:
@@ -530,16 +554,19 @@ def translate_pdf(
                         session_fraction=(session_offset + 1) / session_pages,
                     ),
                 )
-                _save_checkpoint(
+                doc = _continue_from_checkpoint(
                     doc,
-                    source,
-                    partial,
-                    state_path,
-                    start_index=start_index,
-                    end_index=end_index,
-                    next_page_index=page_index + 1,
-                    warnings=warnings,
-                    processed_blocks=processed_blocks,
+                    _save_checkpoint(
+                        doc,
+                        source,
+                        partial,
+                        state_path,
+                        start_index=start_index,
+                        end_index=end_index,
+                        next_page_index=page_index + 1,
+                        warnings=warnings,
+                        processed_blocks=processed_blocks,
+                    ),
                 )
                 continue
 
@@ -610,16 +637,19 @@ def translate_pdf(
                     session_fraction=(session_offset + 1) / session_pages,
                 ),
             )
-            _save_checkpoint(
+            doc = _continue_from_checkpoint(
                 doc,
-                source,
-                partial,
-                state_path,
-                start_index=start_index,
-                end_index=end_index,
-                next_page_index=page_index + 1,
-                warnings=warnings,
-                processed_blocks=processed_blocks,
+                _save_checkpoint(
+                    doc,
+                    source,
+                    partial,
+                    state_path,
+                    start_index=start_index,
+                    end_index=end_index,
+                    next_page_index=page_index + 1,
+                    warnings=warnings,
+                    processed_blocks=processed_blocks,
+                ),
             )
 
         _save_final_pdf(doc, destination)

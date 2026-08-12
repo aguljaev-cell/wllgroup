@@ -16,7 +16,7 @@ from translator import _post_json, _protect_values, _restore_values
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.5.2")
+        self.assertEqual(APP_VERSION, "0.5.3")
         self.assertIn("1.5B", config.model_filename)
         self.assertLessEqual(config.request_timeout, 300)
         self.assertEqual(config.gpu_layer_candidates, (20, 12, 4))
@@ -103,9 +103,10 @@ class PdfCheckpointTests(unittest.TestCase):
             self._make_pdf(source)
             partial, state = _checkpoint_paths(destination)
 
-            with fitz.open(str(source)) as checkpoint_doc:
+            checkpoint_doc = fitz.open(str(source))
+            try:
                 checkpoint_doc[0].insert_text((72, 100), "Checkpointed")
-                _save_checkpoint(
+                reopened = _save_checkpoint(
                     checkpoint_doc,
                     source,
                     partial,
@@ -116,6 +117,9 @@ class PdfCheckpointTests(unittest.TestCase):
                     warnings=[],
                     processed_blocks=1,
                 )
+                reopened.close()
+            finally:
+                checkpoint_doc.close()
 
             translated_inputs: list[str] = []
 
