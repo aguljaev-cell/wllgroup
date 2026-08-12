@@ -12,7 +12,7 @@ from model_runtime import LocalModelServer, download_model, model_installed
 from processors import translate_docx, translate_pdf
 
 
-ProgressCallback = Callable[[int, str], None]
+ProgressCallback = Callable[[float, str], None]
 
 
 def _friendly_error(exc: Exception, context: str) -> str:
@@ -42,8 +42,8 @@ class _ProgressState:
         self._emit = emit
         self._last = -1
 
-    def send(self, value: int, message: str) -> None:
-        normalized = max(0, min(100, int(value)))
+    def send(self, value: float, message: str) -> None:
+        normalized = max(0.0, min(100.0, float(value)))
         if normalized < self._last:
             normalized = self._last
         self._last = normalized
@@ -51,7 +51,7 @@ class _ProgressState:
 
 
 class SetupWorker(QObject):
-    progress = Signal(int, str)
+    progress = Signal(float, str)
     finished = Signal()
     failed = Signal(str)
 
@@ -95,15 +95,25 @@ class SetupWorker(QObject):
 
 
 class TranslationWorker(QObject):
-    progress = Signal(int, str)
+    progress = Signal(float, str)
     finished = Signal(str, str)
     failed = Signal(str)
 
-    def __init__(self, source: Path, destination: Path, config: AppConfig):
+    def __init__(
+        self,
+        source: Path,
+        destination: Path,
+        config: AppConfig,
+        *,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ):
         super().__init__()
         self.source = Path(source)
         self.destination = Path(destination)
         self.config = config
+        self.page_start = page_start
+        self.page_end = page_end
         self.server = LocalModelServer(config)
         self._cancelled = Event()
         self._server_started = False
@@ -148,7 +158,7 @@ class TranslationWorker(QObject):
 
             def mapped(value: int, message: str) -> None:
                 self._check_cancelled()
-                state.send(10 + int(max(0, min(100, value)) * 0.89), message)
+                state.send(10.0 + max(0.0, min(100.0, float(value))) * 0.89, message)
 
             suffix = self.source.suffix.casefold()
 
@@ -158,6 +168,8 @@ class TranslationWorker(QObject):
                     self.destination,
                     self.config,
                     mapped,
+                    page_start=self.page_start,
+                    page_end=self.page_end,
                 )
             elif suffix == ".docx":
                 report = translate_docx(

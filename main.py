@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, QUrl
+import fitz
+from PySide6.QtCore import QThread, QTimer, Qt, QUrl
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -16,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -88,13 +92,13 @@ QPushButton#danger {
 QPushButton#danger:hover {
     background: #b42318;
 }
-QLineEdit, QTextEdit {
+QLineEdit, QTextEdit, QSpinBox {
     background: white;
     border: 1px solid #d0d5dd;
     border-radius: 8px;
     padding: 9px;
 }
-QLineEdit:focus, QTextEdit:focus {
+QLineEdit:focus, QTextEdit:focus, QSpinBox:focus {
     border: 1px solid #2457d6;
 }
 QProgressBar {
@@ -124,10 +128,17 @@ class MainWindow(QMainWindow):
         self.worker: SetupWorker | TranslationWorker | None = None
         self.last_output: Path | None = None
         self.last_report: Path | None = None
+        self.page_count = 0
         self._active_operation = ""
+        self._operation_started = 0.0
+        self._last_activity = 0.0
 
         self._build_ui()
         self._update_state()
+
+        self.activity_timer = QTimer(self)
+        self.activity_timer.timeout.connect(self._update_activity_label)
+        self.activity_timer.start(1000)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -187,6 +198,29 @@ class MainWindow(QMainWindow):
         row.addWidget(self.choose_btn)
         card_layout.addLayout(row)
 
+        self.pdf_options = QWidget()
+        range_row = QHBoxLayout(self.pdf_options)
+        range_row.setContentsMargins(0, 0, 0, 0)
+        range_row.addWidget(QLabel("Страницы PDF:"))
+
+        self.page_start_spin = QSpinBox()
+        self.page_start_spin.setRange(1, 1)
+        self.page_start_spin.setPrefix("с ")
+
+        self.page_end_spin = QSpinBox()
+        self.page_end_spin.setRange(1, 1)
+        self.page_end_spin.setPrefix("по ")
+
+        self.test_mode = QCheckBox("Тестовый режим — только 3 страницы")
+        self.test_mode.setChecked(True)
+
+        range_row.addWidget(self.page_start_spin)
+        range_row.addWidget(self.page_end_spin)
+        range_row.addWidget(self.test_mode)
+        range_row.addStretch(1)
+        self.pdf_options.setVisible(False)
+        card_layout.addWidget(self.pdf_options)
+
         action_row = QHBoxLayout()
 
         self.start_btn = QPushButton("Перевести и сохранить")
@@ -203,12 +237,17 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(action_row)
 
         self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
+        self.progress.setRange(0, 1000)
         self.progress.setValue(0)
+        self.progress.setFormat("0.0%")
         card_layout.addWidget(self.progress)
 
         self.status = QLabel("Готово к работе")
         card_layout.addWidget(self.status)
+
+        self.activity = QLabel("")
+        self.activity.setObjectName("subtitle")
+        card_layout.addWidget(self.activity)
 
         result_row = QHBoxLayout()
 
@@ -249,6 +288,27 @@ class MainWindow(QMainWindow):
         scrollbar = self.log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def _update_activity_label(self) -> None:
+        if not self._is_busy() or not self._operation_started:
+            return
+
+        now = time.monotonic()
+        total_seconds = int(now - self._operation_started)
+        inactive_seconds = int(now - self._last_activity) if self._last_activity else 0
+        total_minutes, total_remainder = divmod(total_seconds, 60)
+        total_text = (
+            f"{total_minutes} мин {total_remainder:02d} сек"
+            if total_minutes
+            else f"{total_remainder} сек"
+        )
+        if inactive_seconds < 5:
+            activity_text = "активность только что"
+        elif inactive_seconds < 60:
+            activity_text = f"последняя активность {inactive_seconds} сек назад"
+        else:
+            activity_text = f"последняя активность {inactive_seconds // 60} мин назад"
+        self.activity.setText(f"В работе: {total_text}; {activity_text}")
+
     def _update_state(self) -> None:
         ready = model_installed(self.config)
         busy = self._is_busy()
@@ -258,7 +318,7 @@ class MainWindow(QMainWindow):
             self.runtime_status.setObjectName("runtimeReady")
         else:
             self.runtime_status.setText(
-                "Для первого запуска требуется загрузка языковой модели (~4,7 ГБ)"
+                "Для первого запуска требуется загрузка облегчённой модели (~1 ГБ)"
             )
             self.runtime_status.setObjectName("runtimeMissing")
 
@@ -269,6 +329,9 @@ class MainWindow(QMainWindow):
         self.install_btn.setEnabled(not busy)
 
         self.choose_btn.setEnabled(not busy)
+        self.page_start_spin.setEnabled(not busy)
+        self.page_end_spin.setEnabled(not busy)
+        self.test_mode.setEnabled(not busy)
         self.start_btn.setEnabled(
             ready and not busy and self.source is not None
         )
@@ -303,9 +366,32 @@ class MainWindow(QMainWindow):
             )
             return
 
+        is_pdf = path.suffix.casefold() == ".pdf"
+        self.page_count = 0
+        if is_pdf:
+            try:
+                with fitz.open(str(path)) as doc:
+                    self.page_count = doc.page_count
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Не удалось открыть PDF",
+                    f"Не удалось определить количество страниц:\n{exc}",
+                )
+                return
+
+            maximum = max(1, self.page_count)
+            self.page_start_spin.setRange(1, maximum)
+            self.page_end_spin.setRange(1, maximum)
+            self.page_start_spin.setValue(1)
+            self.page_end_spin.setValue(maximum)
+            self.test_mode.setChecked(maximum > 3)
+
         self.source = path
+        self.pdf_options.setVisible(is_pdf)
         self.file_edit.setText(str(path))
-        self.status.setText(f"Выбран файл: {path.name}")
+        pages_note = f" ({self.page_count} стр.)" if is_pdf else ""
+        self.status.setText(f"Выбран файл: {path.name}{pages_note}")
         self._append_log(f"Выбран исходный файл: {path}")
         self._update_state()
 
@@ -348,7 +434,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Загрузка модели",
-            "Будет загружено около 4,7 ГБ. После установки перевод "
+            "Будет загружена облегчённая модель около 1 ГБ. После установки перевод "
             "будет работать локально.\n\nПродолжить?",
         )
         if answer == QMessageBox.StandardButton.Yes:
@@ -371,7 +457,38 @@ class MainWindow(QMainWindow):
             return
 
         suffix = self.source.suffix.casefold()
-        suggested = self.source.with_name(f"{self.source.stem}_RU{suffix}")
+        page_start: int | None = None
+        page_end: int | None = None
+        range_suffix = ""
+
+        if suffix == ".pdf":
+            page_start = self.page_start_spin.value()
+            page_end = self.page_end_spin.value()
+            if page_start > page_end:
+                QMessageBox.warning(
+                    self,
+                    "Неверный диапазон",
+                    "Начальная страница не может быть больше конечной.",
+                )
+                return
+
+            if self.test_mode.isChecked():
+                page_end = min(page_end, page_start + 2)
+                range_suffix = f"_TEST_{page_start}-{page_end}"
+            elif page_end - page_start + 1 > 20:
+                answer = QMessageBox.question(
+                    self,
+                    "Большой диапазон",
+                    "Для большого PDF рекомендуется сначала включить тестовый режим "
+                    "на 3 страницы и оценить скорость и качество.\n\n"
+                    "Всё равно начать полный перевод?",
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+
+        suggested = self.source.with_name(
+            f"{self.source.stem}_RU{range_suffix}{suffix}"
+        )
 
         name, _ = QFileDialog.getSaveFileName(
             self,
@@ -402,6 +519,8 @@ class MainWindow(QMainWindow):
                 self.source,
                 destination,
                 self.config,
+                page_start=page_start,
+                page_end=page_end,
             ),
             "Перевод выполняется…",
             setup=False,
@@ -437,8 +556,12 @@ class MainWindow(QMainWindow):
         self.thread.finished.connect(self.cleanup)
 
         self.progress.setValue(0)
+        self.progress.setFormat("0.0%")
         self.log.clear()
         self.status.setText(message)
+        self._operation_started = time.monotonic()
+        self._last_activity = self._operation_started
+        self.activity.setText("В работе: 0 сек; активность только что")
         self._append_log(message)
         self._update_state()
 
@@ -466,9 +589,13 @@ class MainWindow(QMainWindow):
 
         self.cancel_btn.setEnabled(False)
 
-    def on_progress(self, value: int, message: str) -> None:
-        self.progress.setValue(max(0, min(100, value)))
+    def on_progress(self, value: float, message: str) -> None:
+        normalized = max(0.0, min(100.0, float(value)))
+        self.progress.setValue(round(normalized * 10))
+        self.progress.setFormat(f"{normalized:.1f}%")
         self.status.setText(message)
+        self._last_activity = time.monotonic()
+        self._update_activity_label()
 
         last_line = self.log.toPlainText().splitlines()
         if not last_line or last_line[-1] != message:
@@ -476,7 +603,9 @@ class MainWindow(QMainWindow):
 
     def on_setup_finished(self) -> None:
         self.status.setText("Модель установлена")
-        self.progress.setValue(100)
+        self.progress.setValue(1000)
+        self.progress.setFormat("100.0%")
+        self.activity.setText("Установка завершена")
         self._append_log("Языковая модель установлена и готова к работе.")
 
         QMessageBox.information(
@@ -490,7 +619,9 @@ class MainWindow(QMainWindow):
         self.last_report = Path(report)
 
         self.status.setText("Перевод завершён")
-        self.progress.setValue(100)
+        self.progress.setValue(1000)
+        self.progress.setFormat("100.0%")
+        self.activity.setText("Операция завершена")
 
         self._append_log(f"Результат: {output}")
         self._append_log(f"QA-отчёт: {report}")
@@ -504,6 +635,9 @@ class MainWindow(QMainWindow):
 
     def on_failed(self, message: str) -> None:
         self.status.setText("Ошибка")
+        self.activity.setText(
+            "Операция остановлена; готовые страницы будут продолжены при повторном запуске"
+        )
         self._append_log("ОШИБКА:")
         self._append_log(message)
 
@@ -547,6 +681,8 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.thread = None
         self._active_operation = ""
+        self._operation_started = 0.0
+        self._last_activity = 0.0
         self._update_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:

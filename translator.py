@@ -308,7 +308,7 @@ def _post_json(
     url: str,
     payload: dict[str, Any],
     timeout: float,
-    retries: int = 3,
+    retries: int = 1,
 ) -> dict[str, Any]:
     last_error: Exception | None = None
 
@@ -320,6 +320,11 @@ def _post_json(
             if not isinstance(data, dict):
                 raise ValueError("Сервер вернул JSON неправильного формата")
             return data
+        except requests.Timeout as exc:
+            raise RuntimeError(
+                "Языковая модель превысила лимит времени. "
+                "Повтор этого же блока отключён, чтобы программа не зациклилась."
+            ) from exc
         except (requests.RequestException, ValueError) as exc:
             last_error = exc
             if attempt == retries:
@@ -352,7 +357,7 @@ def _translate_chunk(text: str, config: AppConfig) -> str:
         ],
         "temperature": float(getattr(config, "temperature", 0.1)),
         "stream": False,
-        "max_tokens": 4096,
+        "max_tokens": int(getattr(config, "max_output_tokens", 1536)),
     }
 
     model_name = getattr(config, "model_name", None) or getattr(config, "model", None)

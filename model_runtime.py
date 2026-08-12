@@ -15,9 +15,9 @@ import requests
 from config import AppConfig, app_data_dir
 
 
-Progress = Callable[[int, str], None]
+Progress = Callable[[float, str], None]
 
-_MIN_MODEL_SIZE = 1_000_000_000
+_MIN_MODEL_SIZE = 500_000_000
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 _DOWNLOAD_RETRIES = 4
 _SERVER_START_TIMEOUT = 180
@@ -28,13 +28,18 @@ def resource_path(relative: str) -> Path:
     return root / relative
 
 
-def llama_server_candidates() -> list[tuple[str, Path, int]]:
-    """Возвращает движки в порядке предпочтения: Vulkan, затем CPU."""
+def llama_server_candidates(config: AppConfig) -> list[tuple[str, Path, int]]:
+    """Возвращает безопасные варианты Vulkan, затем CPU."""
     name = "llama-server.exe" if os.name == "nt" else "llama-server"
+    vulkan_path = resource_path(f"vendor/llama/vulkan/{name}")
+    cpu_path = resource_path(f"vendor/llama/cpu/{name}")
+    layer_options = tuple(getattr(config, "gpu_layer_candidates", (20, 12, 4)))
     candidates = [
-        ("Vulkan GPU", resource_path(f"vendor/llama/vulkan/{name}"), 99),
-        ("CPU", resource_path(f"vendor/llama/cpu/{name}"), 0),
+        (f"Vulkan GPU ({layers} слоёв)", vulkan_path, int(layers))
+        for layers in layer_options
+        if int(layers) > 0
     ]
+    candidates.append(("CPU", cpu_path, 0))
     return [(label, path, layers) for label, path, layers in candidates if path.exists()]
 
 
@@ -330,7 +335,7 @@ class LocalModelServer:
             self._owns_process = False
             return
 
-        runtimes = llama_server_candidates()
+        runtimes = llama_server_candidates(self.config)
         if not runtimes:
             raise RuntimeError(
                 "В сборке отсутствуют локальные движки Vulkan и CPU"
@@ -350,12 +355,11 @@ class LocalModelServer:
 
         last_reason = ""
 
-        for runtime_label, executable, layers in runtimes:
-            message = (
-                "Запуск модели через видеокарту (Vulkan)…"
-                if layers > 0
-                else "Vulkan недоступен. Запуск модели на процессоре…"
-            )
+        for attempt, (runtime_label, executable, layers) in enumerate(runtimes, start=1):
+            if layers > 0:
+                message = f"Запуск модели через видеокарту: {layers} слоёв…"
+            else:
+                message = "Видеокарта не подошла. Запуск модели на процессоре…"
             progress(0, message)
             args = self._base_args(executable, layers)
             self._start_process(args)
@@ -375,6 +379,10 @@ class LocalModelServer:
                 else "превышено время ожидания"
             )
             self._close_process_only()
+
+            if attempt < len(runtimes):
+                next_label = runtimes[attempt][0]
+                progress(0, f"Вариант {runtime_label} не запустился. Пробуем {next_label}…")
 
         raise RuntimeError(
             "Не удалось запустить локальную модель: "

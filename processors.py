@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -14,7 +16,9 @@ from config import AppConfig
 from translator import qa_text, should_translate, translate_text
 
 
-Progress = Callable[[int, str], None]
+Progress = Callable[[float, str], None]
+
+_CHECKPOINT_SCHEMA = 1
 
 
 @dataclass(slots=True)
@@ -27,9 +31,9 @@ class PdfTextBlock:
     rotation: int = 0
 
 
-def _safe_progress(progress: Progress, value: int, message: str) -> None:
+def _safe_progress(progress: Progress, value: float, message: str) -> None:
     try:
-        progress(max(0, min(100, int(value))), message)
+        progress(max(0.0, min(100.0, float(value))), message)
     except Exception:
         # Ошибка интерфейсного callback не должна повреждать перевод файла.
         pass
@@ -330,21 +334,186 @@ def _page_has_images(page: fitz.Page) -> bool:
         return False
 
 
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours} ч {minutes:02d} мин"
+    if minutes:
+        return f"{minutes} мин {secs:02d} сек"
+    return f"{secs} сек"
+
+
+def _progress_message(
+    base: str,
+    *,
+    started: float,
+    session_fraction: float,
+) -> str:
+    elapsed = time.monotonic() - started
+    message = f"{base} · прошло {_format_duration(elapsed)}"
+    if session_fraction > 0.0:
+        remaining = elapsed * max(0.0, 1.0 - session_fraction) / session_fraction
+        message += f" · осталось примерно {_format_duration(remaining)}"
+    return message
+
+
+def _checkpoint_paths(destination: Path) -> tuple[Path, Path]:
+    prefix = f".{destination.name}.wll"
+    return (
+        destination.with_name(prefix + "-part.pdf"),
+        destination.with_name(prefix + "-state.json"),
+    )
+
+
+def _source_signature(source: Path) -> dict[str, object]:
+    stat = source.stat()
+    return {
+        "path": str(source.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _discard_checkpoint(partial: Path, state_path: Path) -> None:
+    partial.unlink(missing_ok=True)
+    state_path.unlink(missing_ok=True)
+
+
+def _load_checkpoint(
+    source: Path,
+    partial: Path,
+    state_path: Path,
+    *,
+    start_index: int,
+    end_index: int,
+) -> tuple[fitz.Document, int, list[str], int, bool]:
+    if not partial.exists() or not state_path.exists():
+        return fitz.open(str(source)), start_index, [], 0, False
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        next_index = int(state["next_page_index"])
+        valid = (
+            state.get("schema") == _CHECKPOINT_SCHEMA
+            and state.get("source") == _source_signature(source)
+            and int(state.get("start_index", -1)) == start_index
+            and int(state.get("end_index", -1)) == end_index
+            and start_index <= next_index <= end_index + 1
+        )
+        if not valid:
+            raise ValueError("контрольные данные не соответствуют текущему заданию")
+
+        # Открываем из памяти, чтобы Windows не удерживала checkpoint-файл.
+        doc = fitz.open(stream=partial.read_bytes(), filetype="pdf")
+        warnings = [str(item) for item in state.get("warnings", [])]
+        processed_blocks = max(0, int(state.get("processed_blocks", 0)))
+        return doc, next_index, warnings, processed_blocks, True
+    except Exception:
+        _discard_checkpoint(partial, state_path)
+        return fitz.open(str(source)), start_index, [], 0, False
+
+
+def _save_checkpoint(
+    doc: fitz.Document,
+    source: Path,
+    partial: Path,
+    state_path: Path,
+    *,
+    start_index: int,
+    end_index: int,
+    next_page_index: int,
+    warnings: list[str],
+    processed_blocks: int,
+) -> None:
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial_tmp = partial.with_name(partial.stem + "-tmp.pdf")
+    state_tmp = state_path.with_name(state_path.name + ".tmp")
+    partial_tmp.unlink(missing_ok=True)
+    state_tmp.unlink(missing_ok=True)
+
+    doc.save(str(partial_tmp), garbage=3, deflate=True, clean=False)
+    os.replace(partial_tmp, partial)
+
+    payload = {
+        "schema": _CHECKPOINT_SCHEMA,
+        "source": _source_signature(source),
+        "start_index": start_index,
+        "end_index": end_index,
+        "next_page_index": next_page_index,
+        "warnings": warnings,
+        "processed_blocks": processed_blocks,
+    }
+    state_tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(state_tmp, state_path)
+
+
+def _save_final_pdf(doc: fitz.Document, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.wll-final-tmp.pdf")
+    temporary.unlink(missing_ok=True)
+    doc.save(
+        str(temporary),
+        garbage=4,
+        deflate=True,
+        clean=True,
+        pretty=False,
+    )
+    os.replace(temporary, destination)
+
+
 def translate_pdf(
     source: Path,
     destination: Path,
     config: AppConfig,
     progress: Progress,
+    *,
+    page_start: int | None = None,
+    page_end: int | None = None,
 ) -> Path:
-    doc = fitz.open(str(source))
-    total_pages = max(doc.page_count, 1)
-    warnings: list[str] = []
-    processed_blocks = 0
+    source = Path(source)
+    destination = Path(destination)
+
+    with fitz.open(str(source)) as source_doc:
+        total_pages = source_doc.page_count
+
+    if total_pages < 1:
+        raise ValueError("PDF не содержит страниц")
+
+    start_index = max(0, int(page_start or 1) - 1)
+    end_index = min(total_pages - 1, int(page_end or total_pages) - 1)
+    if start_index > end_index:
+        raise ValueError("Начальная страница диапазона больше конечной")
+
+    partial, state_path = _checkpoint_paths(destination)
+    doc, resume_index, warnings, processed_blocks, resumed = _load_checkpoint(
+        source,
+        partial,
+        state_path,
+        start_index=start_index,
+        end_index=end_index,
+    )
+    range_pages = end_index - start_index + 1
+    session_pages = max(1, end_index - resume_index + 1)
+    started = time.monotonic()
+
+    if resumed:
+        _safe_progress(
+            progress,
+            ((resume_index - start_index) / range_pages) * 100.0,
+            f"Продолжение с сохранённой страницы {resume_index + 1}",
+        )
 
     try:
-        for page_index in range(doc.page_count):
+        for page_index in range(resume_index, end_index + 1):
             page = doc[page_index]
             blocks = _extract_pdf_blocks(page)
+            page_offset = page_index - start_index
+            session_offset = page_index - resume_index
 
             if not blocks:
                 image_note = " На странице есть изображения." if _page_has_images(page) else ""
@@ -354,8 +523,23 @@ def translate_pdf(
                 )
                 _safe_progress(
                     progress,
-                    int((page_index + 1) / total_pages * 100),
-                    f"PDF: страница {page_index + 1}/{doc.page_count}",
+                    ((page_offset + 1) / range_pages) * 100.0,
+                    _progress_message(
+                        f"PDF: завершена страница {page_index + 1}/{doc.page_count}",
+                        started=started,
+                        session_fraction=(session_offset + 1) / session_pages,
+                    ),
+                )
+                _save_checkpoint(
+                    doc,
+                    source,
+                    partial,
+                    state_path,
+                    start_index=start_index,
+                    end_index=end_index,
+                    next_page_index=page_index + 1,
+                    warnings=warnings,
+                    processed_blocks=processed_blocks,
                 )
                 continue
 
@@ -380,54 +564,66 @@ def translate_pdf(
 
                 _safe_progress(
                     progress,
-                    int(((page_index + block_number / len(blocks)) / total_pages) * 100),
-                    f"PDF: страница {page_index + 1}/{doc.page_count}, "
-                    f"блок {block_number}/{len(blocks)}",
+                    ((page_offset + block_number / len(blocks)) / range_pages) * 100.0,
+                    _progress_message(
+                        f"PDF: страница {page_index + 1}/{doc.page_count}, "
+                        f"блок {block_number}/{len(blocks)}",
+                        started=started,
+                        session_fraction=(
+                            session_offset + block_number / len(blocks)
+                        ) / session_pages,
+                    ),
                 )
 
-            if not translated_blocks:
-                continue
-
-            # Удаляем только успешно переведённые блоки.
-            for block, _ in translated_blocks:
-                page.add_redact_annot(
-                    _expanded_rect(block.rect, page.rect, margin=0.4),
-                    fill=(1, 1, 1),
-                )
-
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-
-            for block_number, (block, translated) in enumerate(translated_blocks, start=1):
-                inserted, used_size = _insert_translated_text(page, block, translated)
-                processed_blocks += 1
-
-                if not inserted:
-                    warnings.append(
-                        f"PDF, страница {page_index + 1}, блок {block_number}: "
-                        "перевод не поместился даже при минимальном размере шрифта"
+            if translated_blocks:
+                # Удаляем только успешно переведённые блоки.
+                for block, _ in translated_blocks:
+                    page.add_redact_annot(
+                        _expanded_rect(block.rect, page.rect, margin=0.4),
+                        fill=(1, 1, 1),
                     )
-                elif used_size < max(5.0, block.font_size * 0.55):
-                    warnings.append(
-                        f"PDF, страница {page_index + 1}, блок {block_number}: "
-                        f"шрифт сильно уменьшен до {used_size:.1f} pt"
-                    )
+
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+                for block_number, (block, translated) in enumerate(translated_blocks, start=1):
+                    inserted, used_size = _insert_translated_text(page, block, translated)
+                    processed_blocks += 1
+
+                    if not inserted:
+                        warnings.append(
+                            f"PDF, страница {page_index + 1}, блок {block_number}: "
+                            "перевод не поместился даже при минимальном размере шрифта"
+                        )
+                    elif used_size < max(5.0, block.font_size * 0.55):
+                        warnings.append(
+                            f"PDF, страница {page_index + 1}, блок {block_number}: "
+                            f"шрифт сильно уменьшен до {used_size:.1f} pt"
+                        )
 
             _safe_progress(
                 progress,
-                int((page_index + 1) / total_pages * 100),
-                f"PDF: завершена страница {page_index + 1}/{doc.page_count}",
+                ((page_offset + 1) / range_pages) * 100.0,
+                _progress_message(
+                    f"PDF: завершена страница {page_index + 1}/{doc.page_count}; "
+                    "результат страницы сохранён",
+                    started=started,
+                    session_fraction=(session_offset + 1) / session_pages,
+                ),
+            )
+            _save_checkpoint(
+                doc,
+                source,
+                partial,
+                state_path,
+                start_index=start_index,
+                end_index=end_index,
+                next_page_index=page_index + 1,
+                warnings=warnings,
+                processed_blocks=processed_blocks,
             )
 
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        # incremental=False, так как destination является новым файлом.
-        doc.save(
-            str(destination),
-            garbage=4,
-            deflate=True,
-            clean=True,
-            pretty=False,
-        )
+        _save_final_pdf(doc, destination)
+        _discard_checkpoint(partial, state_path)
     finally:
         doc.close()
 

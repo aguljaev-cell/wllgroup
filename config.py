@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 APP_NAME = "PDFMathTranslate WLL"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 ORGANIZATION_NAME = "WorldLogicLine"
 
 def _default_local_app_data() -> Path:
@@ -47,24 +47,30 @@ def _default_threads() -> int:
 class AppConfig:
     model_url: str = (
         "https://huggingface.co/bartowski/"
-        "Qwen2.5-7B-Instruct-GGUF/resolve/main/"
-        "Qwen2.5-7B-Instruct-Q4_K_M.gguf?download=true"
+        "Qwen2.5-1.5B-Instruct-GGUF/resolve/"
+        "02938d9fe88f34a3a9960128b5092f20940e7553/"
+        "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf?download=true"
     )
-    model_filename: str = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+    model_filename: str = "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
 
     model_size: int | None = None
-    model_sha256: str | None = None
+    model_sha256: str | None = (
+        "50961d9b7d3b89e46be230528fc66d38"
+        "bbdda8ac3748323dd34f129a714124fc"
+    )
 
     server_host: str = "127.0.0.1"
     server_port: int = 8091
 
-    context_size: int = 8192
-    batch_size: int = 256
+    context_size: int = 4096
+    batch_size: int = 128
     threads: int = 0
-    gpu_layers: int = 99
+    gpu_layers: int = 20
+    gpu_layer_candidates: tuple[int, ...] = (20, 12, 4)
 
     temperature: float = 0.05
-    request_timeout: int = 900
+    request_timeout: int = 300
+    max_output_tokens: int = 1536
 
     def __post_init__(self) -> None:
         if self.threads <= 0:
@@ -73,8 +79,19 @@ class AppConfig:
         self.context_size = max(2048, int(self.context_size))
         self.batch_size = max(32, int(self.batch_size))
         self.gpu_layers = max(0, int(self.gpu_layers))
+        self.gpu_layer_candidates = tuple(
+            sorted(
+                {
+                    max(0, int(value))
+                    for value in self.gpu_layer_candidates
+                    if int(value) > 0
+                },
+                reverse=True,
+            )
+        )
         self.temperature = max(0.0, min(1.0, float(self.temperature)))
         self.request_timeout = max(60, int(self.request_timeout))
+        self.max_output_tokens = max(256, min(4096, int(self.max_output_tokens)))
 
     @property
     def model_path(self) -> Path:
