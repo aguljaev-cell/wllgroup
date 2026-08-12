@@ -139,11 +139,19 @@ _LATIN_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z-]{3,}\b")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?%)\]])")
 _MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
 _PLACEHOLDER_RE = re.compile(r"⟦WLL_\d{4}⟧")
+_PLACEHOLDER_BODY_RE = re.compile(r"WLL_\d{4}")
 
 _PROTECTED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"https?://\S+", re.IGNORECASE),
     re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
-    re.compile(r"\b(?:UN|ISO|IEC|DIN|EN|GB|GOST|ГОСТ)[-– ]?[A-ZА-Я0-9./:]+\b", re.IGNORECASE),
+    # Standards must start with an uppercase standard prefix and contain a
+    # separator or a number.  The previous case-insensitive expression also
+    # matched ordinary words beginning with "en"/"un", such as Enterprise,
+    # environment, enough and unit, causing valid translations to be rejected.
+    re.compile(
+        r"\b(?:UN|ISO|IEC|DIN|EN|GB|GOST|ГОСТ)"
+        r"(?:[-– ]?\d[A-ZА-Я0-9./:-]*|[-– ][A-ZА-Я][A-ZА-Я0-9./:-]*)\b"
+    ),
     re.compile(r"\b[A-Z]{1,8}[-_/][A-Z0-9][A-Z0-9._/-]*\b"),
     re.compile(r"\b[A-Z]{2,}\d[A-Z0-9._/-]*\b"),
     re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:mm|cm|m|km|kg|g|mg|t|kN|N|MPa|kPa|Pa|bar|psi|°C|°F|V|kV|A|mA|W|kW|Hz|rpm|r/min|s|ms|min|h|L|ml|m³|cm³|mm²|mm³)\b", re.IGNORECASE),
@@ -269,6 +277,20 @@ def _protect_values(text: str) -> _ProtectedText:
     for pattern in _PROTECTED_PATTERNS:
         def replace(match: re.Match[str]) -> str:
             value = match.group(0)
+
+            # Patterns are applied one after another.  Do not protect the body
+            # of an internal marker created by an earlier pattern; otherwise
+            # ⟦WLL_0001⟧ becomes a nested marker and cannot be restored.
+            start, end = match.span()
+            if (
+                _PLACEHOLDER_BODY_RE.fullmatch(value)
+                and start > 0
+                and end < len(match.string)
+                and match.string[start - 1] == "⟦"
+                and match.string[end] == "⟧"
+            ):
+                return value
+
             token = f"⟦WLL_{len(values) + 1:04d}⟧"
             values[token] = value
             return token
