@@ -95,7 +95,7 @@ jobs:
           $headers = @{ 'User-Agent' = 'PDFMathTranslate-WLL' }
           $release = Invoke-RestMethod `
             -Headers $headers `
-            -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest'
+            -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10369'
 
           $vulkan = $release.assets | Where-Object {
             $_.name -match 'bin-win-vulkan-x64\.zip$'
