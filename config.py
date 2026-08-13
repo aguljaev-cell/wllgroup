@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 APP_NAME = "PDFMathTranslate WLL"
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 ORGANIZATION_NAME = "WorldLogicLine"
 
 def _default_local_app_data() -> Path:

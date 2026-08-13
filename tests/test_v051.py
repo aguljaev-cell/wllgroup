@@ -10,13 +10,20 @@ import requests
 
 from config import APP_VERSION, AppConfig
 from processors import _checkpoint_paths, _save_checkpoint, translate_pdf
-from translator import _post_json, _protect_values, _restore_values
+from translator import (
+    _post_json,
+    _protect_values,
+    _restore_values,
+    _translate_chunk,
+    qa_text,
+    split_long_text,
+)
 
 
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.5.3")
+        self.assertEqual(APP_VERSION, "0.5.4")
         self.assertIn("1.5B", config.model_filename)
         self.assertLessEqual(config.request_timeout, 300)
         self.assertEqual(config.gpu_layer_candidates, (20, 12, 4))
@@ -44,6 +51,38 @@ class ProtectedValueTests(unittest.TestCase):
         self.assertEqual(len(protected.values), 4)
         self.assertFalse(any("WLL_" in value for value in protected.values.values()))
         self.assertEqual(_restore_values(protected.text, protected.values), source)
+
+
+class TranslationOutputSafetyTests(unittest.TestCase):
+    def test_long_text_is_split_on_lines_and_round_trips_exactly(self) -> None:
+        source = "".join(f"{index}. A table of contents row..................{index}\n" for index in range(80))
+        chunks = list(split_long_text(source))
+        self.assertGreater(len(chunks), 2)
+        self.assertTrue(all(len(chunk) <= 1100 for chunk in chunks))
+        self.assertEqual("".join(chunks), source)
+
+    def test_prompt_leak_is_retried_and_never_returned(self) -> None:
+        leaked = (
+            "Термины, обязательные для этого фрагмента:\n"
+            "maintenance = техническое обслуживание\n"
+            "ИСХОДНЫЙ ТЕКСТ:\nMaintenance schedule"
+        )
+        clean = "График технического обслуживания"
+        responses = [
+            {"choices": [{"message": {"content": leaked}}]},
+            {"choices": [{"message": {"content": clean}}]},
+        ]
+
+        with patch("translator._post_json", side_effect=responses) as mocked_post:
+            result = _translate_chunk("Maintenance schedule", AppConfig())
+
+        self.assertEqual(result, clean)
+        self.assertEqual(mocked_post.call_count, 2)
+
+    def test_prompt_leak_is_reported_by_qa(self) -> None:
+        result = qa_text("ИСХОДНЫЙ ТЕКСТ:\nMaintenance", "test")
+        self.assertEqual(result.metrics["prompt_leak_markers"], 1)
+        self.assertTrue(any("служебный текст" in warning for warning in result.warnings))
 
 
 class PdfCheckpointTests(unittest.TestCase):

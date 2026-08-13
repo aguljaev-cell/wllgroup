@@ -28,13 +28,16 @@ SYSTEM_PROMPT = """Ты профессиональный технический 
 
 ПРЕДПОЧТИТЕЛЬНАЯ ТЕРМИНОЛОГИЯ:
 clamping unit = узел смыкания
+clamping force = усилие смыкания
 injection unit = узел впрыска
+injection pressure = давление впрыска
 mold / mould = пресс-форма
 nozzle = сопло
 screw = шнек
 barrel = материальный цилиндр
 hydraulic oil = гидравлическое масло
 control panel = панель управления
+control cabinet = шкаф управления
 limit switch = концевой выключатель
 proximity switch = датчик приближения
 servo motor = серводвигатель
@@ -141,6 +144,19 @@ _MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
 _PLACEHOLDER_RE = re.compile(r"⟦WLL_\d{4}⟧")
 _PLACEHOLDER_BODY_RE = re.compile(r"WLL_\d{4}")
 
+# Phrases from our own prompts must never appear in a translated document.
+# Small local models sometimes echo the user message before producing a
+# translation, especially for long tables of contents.
+_PROMPT_LEAK_MARKERS: tuple[str, ...] = (
+    "исходный текст:",
+    "термины, обязательные для этого фрагмента:",
+    "переведи следующий фрагмент",
+    "переведи текст ниже",
+    "только русский перевод следующего текста",
+    "обязательные правила:",
+    "предпочтительная терминология:",
+)
+
 _PROTECTED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"https?://\S+", re.IGNORECASE),
     re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"),
@@ -176,7 +192,7 @@ class _ProtectedText:
     values: dict[str, str]
 
 
-def split_long_text(text: str, max_chars: int = 2400) -> Iterator[str]:
+def split_long_text(text: str, max_chars: int = 1100) -> Iterator[str]:
     if max_chars < 300:
         raise ValueError("max_chars must be at least 300")
 
@@ -184,7 +200,11 @@ def split_long_text(text: str, max_chars: int = 2400) -> Iterator[str]:
         yield text
         return
 
-    blocks = re.split(r"(\n{2,})", text)
+    # Split at existing line boundaries first.  This keeps table-of-contents
+    # rows together and gives the 1.5B model substantially smaller requests.
+    # splitlines(keepends=True) also guarantees that joining all chunks
+    # reconstructs the source exactly.
+    blocks = text.splitlines(keepends=True) or [text]
     current = ""
 
     for block in blocks:
@@ -308,22 +328,63 @@ def _restore_values(text: str, values: dict[str, str]) -> str:
 
 
 def _build_user_prompt(text: str) -> str:
-    relevant_terms: list[str] = []
-    lowered = text.casefold()
-
-    for source, target in GLOSSARY.items():
-        if source in lowered:
-            relevant_terms.append(f"{source} = {target}")
-
-    glossary_part = ""
-    if relevant_terms:
-        glossary_part = "\n\nТермины, обязательные для этого фрагмента:\n" + "\n".join(relevant_terms)
-
+    # The complete glossary and formatting rules already live in the system
+    # prompt. Repeating them here made the lightweight model echo the prompt
+    # into the PDF, so the per-chunk instruction is intentionally minimal.
     return (
-        "Переведи следующий фрагмент на русский язык. "
-        "Сохрани количество и порядок строк. Верни только перевод."
-        f"{glossary_part}\n\nИСХОДНЫЙ ТЕКСТ:\n{text}"
+        "Переведи текст ниже на русский язык. "
+        "Выведи только перевод, без задания и исходного текста.\n\n"
+        f"{text}"
     )
+
+
+def _build_retry_prompt(text: str) -> str:
+    return f"Только русский перевод следующего текста, без пояснений:\n{text}"
+
+
+def _prompt_leak_markers(text: str) -> list[str]:
+    lowered = re.sub(r"\s+", " ", text.casefold())
+    return [
+        marker
+        for marker in _PROMPT_LEAK_MARKERS
+        if re.sub(r"\s+", " ", marker.casefold()) in lowered
+    ]
+
+
+def _source_echo_is_excessive(source: str, translated: str) -> bool:
+    source_lines = [line.strip() for line in source.splitlines() if line.strip()]
+    if len(source_lines) < 4:
+        return False
+
+    candidates = [
+        line
+        for line in source_lines
+        if len(line) >= 18
+        and sum(ch.isascii() and ch.isalpha() for ch in line)
+        >= max(8, sum(ch.isalpha() for ch in line) // 2)
+    ]
+    if len(candidates) < 3:
+        return False
+
+    normalized_translation = re.sub(r"\s+", " ", translated.casefold())
+    echoed = sum(
+        re.sub(r"\s+", " ", line.casefold()) in normalized_translation
+        for line in candidates
+    )
+    return echoed >= max(3, (len(candidates) + 2) // 3)
+
+
+def _validate_model_translation(source: str, translated: str) -> None:
+    leaked = _prompt_leak_markers(translated)
+    if leaked:
+        raise RuntimeError("Модель повторила служебный текст задания")
+
+    source_len = max(len(source.strip()), 1)
+    if len(translated.strip()) > source_len * 2.2:
+        raise RuntimeError("Ответ модели подозрительно длинный")
+
+    if _source_echo_is_excessive(source, translated):
+        raise RuntimeError("Модель повторила значительную часть исходного текста")
 
 
 def _post_json(
@@ -371,40 +432,49 @@ def _extract_response_text(data: dict[str, Any]) -> str:
 
 def _translate_chunk(text: str, config: AppConfig) -> str:
     protected = _protect_values(text)
+    prompts = (_build_user_prompt(protected.text), _build_retry_prompt(protected.text))
+    last_error: RuntimeError | None = None
 
-    payload: dict[str, Any] = {
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_prompt(protected.text)},
-        ],
-        "temperature": float(getattr(config, "temperature", 0.1)),
-        "stream": False,
-        "max_tokens": int(getattr(config, "max_output_tokens", 1536)),
-    }
+    for attempt, user_prompt in enumerate(prompts):
+        payload: dict[str, Any] = {
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.0 if attempt else float(getattr(config, "temperature", 0.1)),
+            "stream": False,
+            "max_tokens": int(getattr(config, "max_output_tokens", 1536)),
+        }
 
-    model_name = getattr(config, "model_name", None) or getattr(config, "model", None)
-    if model_name:
-        payload["model"] = model_name
+        model_name = getattr(config, "model_name", None) or getattr(config, "model", None)
+        if model_name:
+            payload["model"] = model_name
 
-    server_url = str(config.server_url).rstrip("/")
-    timeout = float(getattr(config, "request_timeout", 300))
+        server_url = str(config.server_url).rstrip("/")
+        timeout = float(getattr(config, "request_timeout", 300))
 
-    data = _post_json(
-        f"{server_url}/v1/chat/completions",
-        payload,
-        timeout=timeout,
-    )
-    translated = _clean_model_output(_extract_response_text(data))
-    translated = _restore_values(translated, protected.values)
-
-    missing = [value for value in protected.values.values() if value not in translated]
-    if missing:
-        raise RuntimeError(
-            "Модель изменила защищённые технические значения: "
-            + ", ".join(missing[:5])
+        data = _post_json(
+            f"{server_url}/v1/chat/completions",
+            payload,
+            timeout=timeout,
         )
+        translated = _clean_model_output(_extract_response_text(data))
+        translated = _restore_values(translated, protected.values)
 
-    return translated or text
+        missing = [value for value in protected.values.values() if value not in translated]
+        try:
+            if missing:
+                raise RuntimeError(
+                    "Модель изменила защищённые технические значения: "
+                    + ", ".join(missing[:5])
+                )
+            _validate_model_translation(text, translated)
+            return translated or text
+        except RuntimeError as exc:
+            last_error = exc
+
+    assert last_error is not None
+    raise last_error
 
 
 def translate_text(text: str, config: AppConfig) -> str:
@@ -460,6 +530,11 @@ def qa_text(
         warnings.append(
             f"{label}: остались внутренние маркеры защиты — {len(placeholders)}"
         )
+
+    prompt_leaks = _prompt_leak_markers(text)
+    metrics["prompt_leak_markers"] = len(prompt_leaks)
+    if prompt_leaks:
+        warnings.append(f"{label}: в перевод попал служебный текст задания")
 
     if source_text:
         source_len = max(len(source_text.strip()), 1)
