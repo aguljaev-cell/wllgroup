@@ -28,8 +28,11 @@ SYSTEM_PROMPT = """Ты профессиональный технический 
 
 ПРЕДПОЧТИТЕЛЬНАЯ ТЕРМИНОЛОГИЯ:
 clamping unit = узел смыкания
+clamping part = узел смыкания
 clamping force = усилие смыкания
 injection unit = узел впрыска
+injection part = узел впрыска
+injection system = система впрыска
 injection pressure = давление впрыска
 injection molding = литьё пластмасс под давлением
 injection molding machine = термопластавтомат
@@ -72,6 +75,12 @@ alarm history = журнал аварий
 maintenance = техническое обслуживание
 troubleshooting = поиск и устранение неисправностей
 operation manual = руководство по эксплуатации
+semi-automatic = полуавтоматический режим
+manual operation = ручной режим
+automatic operation = автоматический режим
+hydraulic circuit = гидравлическая система
+test run = пробный запуск
+air bleeding = удаление воздуха
 """
 
 
@@ -81,6 +90,7 @@ GLOSSARY: dict[str, str] = {
     "barrel": "материальный цилиндр",
     "check valve": "обратный клапан",
     "clamping force": "усилие смыкания",
+    "clamping part": "узел смыкания",
     "clamping unit": "узел смыкания",
     "control cabinet": "шкаф управления",
     "control panel": "панель управления",
@@ -95,6 +105,8 @@ GLOSSARY: dict[str, str] = {
     "hopper": "загрузочный бункер",
     "hydraulic oil": "гидравлическое масло",
     "injection pressure": "давление впрыска",
+    "injection part": "узел впрыска",
+    "injection system": "система впрыска",
     "injection molding machine": "термопластавтомат",
     "injection molding": "литьё пластмасс под давлением",
     "injection unit": "узел впрыска",
@@ -122,6 +134,12 @@ GLOSSARY: dict[str, str] = {
     "take-out robot": "робот-съёмщик",
     "troubleshooting": "поиск и устранение неисправностей",
     "operation manual": "руководство по эксплуатации",
+    "semi-automatic": "полуавтоматический режим",
+    "manual operation": "ручной режим",
+    "automatic operation": "автоматический режим",
+    "hydraulic circuit": "гидравлическая система",
+    "test run": "пробный запуск",
+    "air bleeding": "удаление воздуха",
 }
 
 
@@ -141,6 +159,12 @@ BAD_TRANSLATIONS: tuple[str, ...] = (
     "превмогу",
     "precision machinery serial",
     "монтажа оборудования для впрыска",
+    "семиатомный",
+    "токсичное масло",
+    "замесить пластики",
+    "впихнуть",
+    "пластожиж",
+    "каталог 1 (впрыска)",
 )
 
 
@@ -430,14 +454,23 @@ def _validate_model_translation(source: str, translated: str) -> None:
     cyrillic_words = _CYRILLIC_WORD_RE.findall(translated)
     source_latin_words = _LATIN_WORD_RE.findall(source)
 
+    normalized_source = re.sub(r"\s+", " ", source.casefold()).strip()
+    normalized_result = re.sub(r"\s+", " ", translated.casefold()).strip()
+    if (
+        normalized_source == normalized_result
+        and len(source_latin_words) >= 2
+        and latin_words
+    ):
+        raise RuntimeError("Модель вернула исходный английский текст без перевода")
+
     if cyrillic_words and latin_words:
         examples = ", ".join(dict.fromkeys(latin_words[:5]))
         raise RuntimeError("В переводе остались английские слова: " + examples)
 
     if (
-        len(source_latin_words) >= 12
+        len(source_latin_words) >= 4
         and not cyrillic_words
-        and len(latin_words) >= max(8, len(source_latin_words) // 2)
+        and len(latin_words) >= max(3, (len(source_latin_words) + 1) // 2)
     ):
         raise RuntimeError("Модель вернула непереведённый английский текст")
 
@@ -531,6 +564,72 @@ def _translate_chunk(text: str, config: AppConfig) -> str:
     raise last_error
 
 
+def _retry_split_position(text: str) -> int | None:
+    """Choose a balanced semantic boundary for a smaller translation request."""
+    if len(text.strip()) < 24 and "\n" not in text:
+        return None
+
+    midpoint = len(text) / 2
+    minimum_side = max(4, min(48, len(text) // 5))
+    patterns = (
+        r"\n+",
+        r"(?<=[.!?。！？;；:：])\s+",
+        r"(?<=[,，])\s+",
+        r"\s+",
+    )
+    for pattern in patterns:
+        positions = [
+            match.end()
+            for match in re.finditer(pattern, text)
+            if match.end() >= minimum_side
+            and len(text) - match.end() >= minimum_side
+        ]
+        if positions:
+            return min(positions, key=lambda value: abs(value - midpoint))
+    return None
+
+
+def _translate_resilient(
+    text: str,
+    config: AppConfig,
+    *,
+    depth: int = 0,
+    max_depth: int = 6,
+) -> str:
+    """Translate a fragment, recursively reducing only rejected requests."""
+    leading_match = re.match(r"^\s*", text)
+    trailing_match = re.search(r"\s*$", text)
+    leading = leading_match.group(0) if leading_match else ""
+    trailing = trailing_match.group(0) if trailing_match else ""
+    core_end = len(text) - len(trailing) if trailing else len(text)
+    core = text[len(leading):core_end]
+
+    if not should_translate(core):
+        return text
+
+    try:
+        return leading + _translate_chunk(core, config) + trailing
+    except RuntimeError as original_error:
+        if depth >= max_depth:
+            raise RuntimeError(
+                "Фрагмент не прошёл проверку качества после дробления"
+            ) from original_error
+
+        position = _retry_split_position(core)
+        if position is None:
+            raise
+
+        left = _translate_resilient(
+            core[:position], config, depth=depth + 1, max_depth=max_depth
+        )
+        right = _translate_resilient(
+            core[position:], config, depth=depth + 1, max_depth=max_depth
+        )
+        combined = left + right
+        _validate_model_translation(core, combined)
+        return leading + combined + trailing
+
+
 def translate_text(text: str, config: AppConfig) -> str:
     if not should_translate(text):
         return text
@@ -539,29 +638,15 @@ def translate_text(text: str, config: AppConfig) -> str:
 
     for chunk in split_long_text(text):
         if should_translate(chunk):
-            try:
-                translated_chunks.append(_translate_chunk(chunk, config))
-            except RuntimeError:
-                if "\n" not in chunk:
-                    raise
-
-                line_results: list[str] = []
-                for part in chunk.splitlines(keepends=True):
-                    newline = "\n" if part.endswith("\n") else ""
-                    line = part[:-1] if newline else part
-                    if should_translate(line):
-                        line_results.append(_translate_chunk(line, config) + newline)
-                    else:
-                        line_results.append(part)
-
-                fallback = "".join(line_results)
-                _validate_model_translation(chunk, fallback)
-                translated_chunks.append(fallback)
+            translated_chunks.append(_translate_resilient(chunk, config))
         else:
             translated_chunks.append(chunk)
 
     translated = "".join(translated_chunks)
-    return translated if translated.strip() else text
+    if translated.strip():
+        _validate_model_translation(text, translated)
+        return translated
+    return text
 
 
 def qa_text(

@@ -18,13 +18,14 @@ from translator import (
     qa_text,
     should_translate,
     split_long_text,
+    translate_text,
 )
 
 
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.5.5")
+        self.assertEqual(APP_VERSION, "0.5.6")
         self.assertIn("1.5B", config.model_filename)
         self.assertLessEqual(config.request_timeout, 300)
         self.assertEqual(config.gpu_layer_candidates, (20, 12, 4))
@@ -116,6 +117,66 @@ class TranslationOutputSafetyTests(unittest.TestCase):
             result = _translate_chunk(source, AppConfig())
         self.assertEqual(result, clean)
         self.assertEqual(mocked_post.call_count, 2)
+
+    def test_short_untranslated_english_line_is_rejected(self) -> None:
+        source = "Oil temperature is too high"
+        responses = [
+            {"choices": [{"message": {"content": source}}]},
+            {"choices": [{"message": {"content": "Температура масла слишком высокая"}}]},
+        ]
+        with patch("translator._post_json", side_effect=responses) as mocked_post:
+            result = _translate_chunk(source, AppConfig())
+        self.assertEqual(result, "Температура масла слишком высокая")
+        self.assertEqual(mocked_post.call_count, 2)
+
+    def test_failed_paragraph_is_split_and_translated_in_smaller_parts(self) -> None:
+        source = (
+            "Oil temperature is too high and the cooling system must be checked. "
+            "The operator must stop the machine before inspecting the hydraulic circuit."
+        )
+        first = "Температура масла слишком высокая, необходимо проверить систему охлаждения. "
+        second = (
+            "Перед проверкой гидравлической системы оператор должен остановить машину."
+        )
+        responses = [
+            {"choices": [{"message": {"content": source}}]},
+            {"choices": [{"message": {"content": source}}]},
+            {"choices": [{"message": {"content": first}}]},
+            {"choices": [{"message": {"content": second}}]},
+        ]
+        with patch("translator._post_json", side_effect=responses) as mocked_post:
+            result = translate_text(source, AppConfig())
+        self.assertIn("Температура масла", result)
+        self.assertIn("оператор должен остановить машину", result)
+        self.assertEqual(mocked_post.call_count, 4)
+
+    def test_recursive_fallback_preserves_manual_line_structure(self) -> None:
+        source = "First line\nSecond line\nThird line\nFourth line"
+        translations = {
+            "First line": "Первая строка",
+            "Second line": "Вторая строка",
+            "Third line": "Третья строка",
+            "Fourth line": "Четвёртая строка",
+        }
+
+        def fake_chunk(text: str, config: AppConfig) -> str:
+            if "\n" in text:
+                raise RuntimeError("block rejected")
+            return translations[text]
+
+        with patch("translator._translate_chunk", side_effect=fake_chunk):
+            result = translate_text(source, AppConfig())
+        self.assertEqual(
+            result,
+            "Первая строка\nВторая строка\nТретья строка\nЧетвёртая строка",
+        )
+
+    def test_known_bad_manual_phrases_are_rejected(self) -> None:
+        result = qa_text(
+            "Семиатомный режим: замесить пластики и впихнуть материал",
+            "manual",
+        )
+        self.assertGreaterEqual(result.metrics["bad_terms"], 3)
 
     def test_collapsed_lines_are_retried(self) -> None:
         source = "First line\nSecond line\nThird line\nFourth line"
@@ -225,6 +286,54 @@ class PdfCheckpointTests(unittest.TestCase):
             self.assertFalse(any("First page" in item for item in translated_inputs))
             with fitz.open(str(destination)) as result:
                 self.assertIn("Checkpointed", result[0].get_text())
+
+    def test_failed_block_stops_pdf_instead_of_saving_english_source(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            destination = root / "result.pdf"
+            self._make_pdf(source)
+
+            with patch(
+                "processors.translate_text",
+                side_effect=RuntimeError("untranslated English"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Перевод остановлен"):
+                    translate_pdf(
+                        source,
+                        destination,
+                        AppConfig(),
+                        lambda value, message: None,
+                        page_start=1,
+                        page_end=1,
+                    )
+
+            self.assertFalse(destination.exists())
+            self.assertTrue(destination.with_name("result_QA_REPORT.txt").exists())
+
+    def test_text_that_does_not_fit_stops_page_before_final_save(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            destination = root / "result.pdf"
+            self._make_pdf(source)
+
+            with (
+                patch("processors.translate_text", return_value="Переведённый текст"),
+                patch("processors._insert_translated_text", return_value=(False, 4.5)),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "не поместился"):
+                    translate_pdf(
+                        source,
+                        destination,
+                        AppConfig(),
+                        lambda value, message: None,
+                        page_start=1,
+                        page_end=1,
+                    )
+
+            self.assertFalse(destination.exists())
+            self.assertTrue(destination.with_name("result_QA_REPORT.txt").exists())
 
 
 if __name__ == "__main__":

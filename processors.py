@@ -576,7 +576,8 @@ def translate_pdf(
                 )
                 continue
 
-            # Сначала переводим. Если отдельный блок упадёт, оригинал останется на месте.
+            # Сначала переводим всю страницу. При ошибке страницу не изменяем и
+            # не сохраняем как завершённую, чтобы повторный запуск начал с неё.
             translated_blocks: list[tuple[PdfTextBlock, str]] = []
             for block_number, block in enumerate(blocks, start=1):
                 try:
@@ -590,10 +591,23 @@ def translate_pdf(
                         ).warnings
                     )
                 except Exception as exc:
-                    warnings.append(
+                    warning = (
                         f"PDF, страница {page_index + 1}, блок {block_number}: "
                         f"ошибка перевода — {exc}"
                     )
+                    warnings.append(warning)
+                    report = _write_qa_report(
+                        destination,
+                        warnings,
+                        source=source,
+                        processed_units=processed_blocks,
+                    )
+                    raise RuntimeError(
+                        f"Перевод остановлен на странице {page_index + 1}, "
+                        f"блок {block_number}: фрагмент не прошёл контроль качества. "
+                        "Исходный английский блок не был принят как готовый перевод. "
+                        f"QA-отчёт: {report}"
+                    ) from exc
 
                 _safe_progress(
                     progress,
@@ -623,9 +637,22 @@ def translate_pdf(
                     processed_blocks += 1
 
                     if not inserted:
-                        warnings.append(
+                        warning = (
                             f"PDF, страница {page_index + 1}, блок {block_number}: "
                             "перевод не поместился даже при минимальном размере шрифта"
+                        )
+                        warnings.append(warning)
+                        report = _write_qa_report(
+                            destination,
+                            warnings,
+                            source=source,
+                            processed_units=processed_blocks,
+                        )
+                        raise RuntimeError(
+                            f"Перевод остановлен на странице {page_index + 1}, "
+                            f"блок {block_number}: русский текст не поместился в исходную область. "
+                            "Страница не отмечена как завершённая. "
+                            f"QA-отчёт: {report}"
                         )
                     elif used_size < max(5.0, block.font_size * 0.55):
                         warnings.append(
