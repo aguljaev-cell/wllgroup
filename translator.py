@@ -31,6 +31,8 @@ clamping unit = узел смыкания
 clamping force = усилие смыкания
 injection unit = узел впрыска
 injection pressure = давление впрыска
+injection molding = литьё пластмасс под давлением
+injection molding machine = термопластавтомат
 mold / mould = пресс-форма
 nozzle = сопло
 screw = шнек
@@ -52,6 +54,8 @@ moving platen = подвижная плита
 fixed platen = неподвижная плита
 tie bar = колонна
 PET preform = ПЭТ-преформа
+preform = преформа
+take-out robot = робот-съёмщик
 robot arm = манипулятор
 pick-and-place = захват и укладка
 hopper = загрузочный бункер
@@ -67,6 +71,7 @@ shot weight = масса впрыска
 alarm history = журнал аварий
 maintenance = техническое обслуживание
 troubleshooting = поиск и устранение неисправностей
+operation manual = руководство по эксплуатации
 """
 
 
@@ -90,6 +95,8 @@ GLOSSARY: dict[str, str] = {
     "hopper": "загрузочный бункер",
     "hydraulic oil": "гидравлическое масло",
     "injection pressure": "давление впрыска",
+    "injection molding machine": "термопластавтомат",
+    "injection molding": "литьё пластмасс под давлением",
     "injection unit": "узел впрыска",
     "limit switch": "концевой выключатель",
     "lubrication": "смазка",
@@ -101,6 +108,7 @@ GLOSSARY: dict[str, str] = {
     "mold": "пресс-форма",
     "nozzle": "сопло",
     "pet preform": "ПЭТ-преформа",
+    "preform": "преформа",
     "pick-and-place": "захват и укладка",
     "pressure gauge": "манометр",
     "proximity switch": "датчик приближения",
@@ -111,7 +119,9 @@ GLOSSARY: dict[str, str] = {
     "shot weight": "масса впрыска",
     "solenoid valve": "электромагнитный клапан",
     "tie bar": "колонна",
+    "take-out robot": "робот-съёмщик",
     "troubleshooting": "поиск и устранение неисправностей",
+    "operation manual": "руководство по эксплуатации",
 }
 
 
@@ -126,6 +136,11 @@ BAD_TRANSLATIONS: tuple[str, ...] = (
     "формовочная машина",
     "масляная дорога",
     "водяная дорога",
+    "reciprocаль",
+    "инжекционная мельница",
+    "превмогу",
+    "precision machinery serial",
+    "монтажа оборудования для впрыска",
 )
 
 
@@ -134,19 +149,19 @@ _ALLOWED_LATIN_WORDS = {
     "mode", "open", "output", "reset", "servo", "setup", "start", "stop",
     "test", "usb", "wifi", "ethernet", "plc", "hmi", "pid", "cnc", "cad",
     "cam", "pdf", "docx", "rpm", "pet", "abs", "pvc", "pa", "pc", "pp",
+    "kronce", "hangzhou", "shanghai", "andy", "enterprise", "development",
+    "precision", "machinery",
 }
 
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LATIN_WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z-]{3,}\b")
+_CYRILLIC_WORD_RE = re.compile(r"\b[А-Яа-яЁё][А-Яа-яЁё-]{2,}\b")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?%)\]])")
 _MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
 _PLACEHOLDER_RE = re.compile(r"⟦WLL_\d{4}⟧")
 _PLACEHOLDER_BODY_RE = re.compile(r"WLL_\d{4}")
 
-# Phrases from our own prompts must never appear in a translated document.
-# Small local models sometimes echo the user message before producing a
-# translation, especially for long tables of contents.
 _PROMPT_LEAK_MARKERS: tuple[str, ...] = (
     "исходный текст:",
     "термины, обязательные для этого фрагмента:",
@@ -200,10 +215,6 @@ def split_long_text(text: str, max_chars: int = 1100) -> Iterator[str]:
         yield text
         return
 
-    # Split at existing line boundaries first.  This keeps table-of-contents
-    # rows together and gives the 1.5B model substantially smaller requests.
-    # splitlines(keepends=True) also guarantees that joining all chunks
-    # reconstructs the source exactly.
     blocks = text.splitlines(keepends=True) or [text]
     current = ""
 
@@ -258,7 +269,14 @@ def should_translate(text: str) -> bool:
     compact = re.sub(r"[\W_]+", "", stripped, flags=re.UNICODE)
     if compact and not any(ch.islower() for ch in compact) and not _CJK_RE.search(compact):
         if len(compact) <= 40:
-            return False
+            words = re.findall(r"[A-Z]{3,}", stripped)
+            natural_heading = len(words) >= 2 or (
+                len(words) == 1
+                and len(words[0]) >= 8
+                and not any(ch.isdigit() for ch in stripped)
+            )
+            if not natural_heading:
+                return False
 
     return True
 
@@ -328,9 +346,6 @@ def _restore_values(text: str, values: dict[str, str]) -> str:
 
 
 def _build_user_prompt(text: str) -> str:
-    # The complete glossary and formatting rules already live in the system
-    # prompt. Repeating them here made the lightweight model echo the prompt
-    # into the PDF, so the per-chunk instruction is intentionally minimal.
     return (
         "Переведи текст ниже на русский язык. "
         "Выведи только перевод, без задания и исходного текста.\n\n"
@@ -379,12 +394,52 @@ def _validate_model_translation(source: str, translated: str) -> None:
     if leaked:
         raise RuntimeError("Модель повторила служебный текст задания")
 
+    cjk_count = len(_CJK_RE.findall(translated))
+    if cjk_count:
+        raise RuntimeError(
+            f"В ответе модели остались китайские иероглифы: {cjk_count}"
+        )
+
+    bad = [term for term in BAD_TRANSLATIONS if term.casefold() in translated.casefold()]
+    if bad:
+        raise RuntimeError(
+            "Модель использовала недопустимые технические формулировки: "
+            + ", ".join(bad[:4])
+        )
+
     source_len = max(len(source.strip()), 1)
     if len(translated.strip()) > source_len * 2.2:
         raise RuntimeError("Ответ модели подозрительно длинный")
 
     if _source_echo_is_excessive(source, translated):
         raise RuntimeError("Модель повторила значительную часть исходного текста")
+
+    source_lines = [line for line in source.splitlines() if line.strip()]
+    result_lines = [line for line in translated.splitlines() if line.strip()]
+    if len(source_lines) >= 3 and len(result_lines) < max(2, (len(source_lines) + 1) // 2):
+        raise RuntimeError(
+            "Модель нарушила структуру строк "
+            f"({len(source_lines)} → {len(result_lines)})"
+        )
+
+    latin_words = [
+        word
+        for word in _LATIN_WORD_RE.findall(translated)
+        if word.casefold() not in _ALLOWED_LATIN_WORDS
+    ]
+    cyrillic_words = _CYRILLIC_WORD_RE.findall(translated)
+    source_latin_words = _LATIN_WORD_RE.findall(source)
+
+    if cyrillic_words and latin_words:
+        examples = ", ".join(dict.fromkeys(latin_words[:5]))
+        raise RuntimeError("В переводе остались английские слова: " + examples)
+
+    if (
+        len(source_latin_words) >= 12
+        and not cyrillic_words
+        and len(latin_words) >= max(8, len(source_latin_words) // 2)
+    ):
+        raise RuntimeError("Модель вернула непереведённый английский текст")
 
 
 def _post_json(
@@ -452,7 +507,6 @@ def _translate_chunk(text: str, config: AppConfig) -> str:
 
         server_url = str(config.server_url).rstrip("/")
         timeout = float(getattr(config, "request_timeout", 300))
-
         data = _post_json(
             f"{server_url}/v1/chat/completions",
             payload,
@@ -485,7 +539,24 @@ def translate_text(text: str, config: AppConfig) -> str:
 
     for chunk in split_long_text(text):
         if should_translate(chunk):
-            translated_chunks.append(_translate_chunk(chunk, config))
+            try:
+                translated_chunks.append(_translate_chunk(chunk, config))
+            except RuntimeError:
+                if "\n" not in chunk:
+                    raise
+
+                line_results: list[str] = []
+                for part in chunk.splitlines(keepends=True):
+                    newline = "\n" if part.endswith("\n") else ""
+                    line = part[:-1] if newline else part
+                    if should_translate(line):
+                        line_results.append(_translate_chunk(line, config) + newline)
+                    else:
+                        line_results.append(part)
+
+                fallback = "".join(line_results)
+                _validate_model_translation(chunk, fallback)
+                translated_chunks.append(fallback)
         else:
             translated_chunks.append(chunk)
 

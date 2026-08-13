@@ -16,6 +16,7 @@ from translator import (
     _restore_values,
     _translate_chunk,
     qa_text,
+    should_translate,
     split_long_text,
 )
 
@@ -23,7 +24,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.5.4")
+        self.assertEqual(APP_VERSION, "0.5.5")
         self.assertIn("1.5B", config.model_filename)
         self.assertLessEqual(config.request_timeout, 300)
         self.assertEqual(config.gpu_layer_candidates, (20, 12, 4))
@@ -54,6 +55,12 @@ class ProtectedValueTests(unittest.TestCase):
 
 
 class TranslationOutputSafetyTests(unittest.TestCase):
+    def test_natural_all_caps_heading_is_translated_but_code_is_not(self) -> None:
+        self.assertTrue(should_translate("CATALOGUE ONE (INJECTION)"))
+        self.assertTrue(should_translate("DECLARATION"))
+        self.assertFalse(should_translate("KS-PET"))
+        self.assertFalse(should_translate("PLC"))
+
     def test_long_text_is_split_on_lines_and_round_trips_exactly(self) -> None:
         source = "".join(f"{index}. A table of contents row..................{index}\n" for index in range(80))
         chunks = list(split_long_text(source))
@@ -72,10 +79,8 @@ class TranslationOutputSafetyTests(unittest.TestCase):
             {"choices": [{"message": {"content": leaked}}]},
             {"choices": [{"message": {"content": clean}}]},
         ]
-
         with patch("translator._post_json", side_effect=responses) as mocked_post:
             result = _translate_chunk("Maintenance schedule", AppConfig())
-
         self.assertEqual(result, clean)
         self.assertEqual(mocked_post.call_count, 2)
 
@@ -83,6 +88,47 @@ class TranslationOutputSafetyTests(unittest.TestCase):
         result = qa_text("ИСХОДНЫЙ ТЕКСТ:\nMaintenance", "test")
         self.assertEqual(result.metrics["prompt_leak_markers"], 1)
         self.assertTrue(any("служебный текст" in warning for warning in result.warnings))
+
+    def test_cjk_output_is_retried(self) -> None:
+        responses = [
+            {"choices": [{"message": {"content": "Система впрыска 机器"}}]},
+            {"choices": [{"message": {"content": "Система впрыска"}}]},
+        ]
+        with patch("translator._post_json", side_effect=responses) as mocked_post:
+            result = _translate_chunk("Injection system", AppConfig())
+        self.assertEqual(result, "Система впрыска")
+        self.assertEqual(mocked_post.call_count, 2)
+
+    def test_untranslated_english_paragraph_is_retried(self) -> None:
+        source = (
+            "Melt plastic into melt status and inject the melted material into the mold "
+            "while the machine prepares raw materials for the next injection cycle."
+        )
+        clean = (
+            "Расплавьте пластик и впрысните расплавленный материал в пресс-форму, "
+            "пока машина подготавливает сырьё для следующего цикла впрыска."
+        )
+        responses = [
+            {"choices": [{"message": {"content": source}}]},
+            {"choices": [{"message": {"content": clean}}]},
+        ]
+        with patch("translator._post_json", side_effect=responses) as mocked_post:
+            result = _translate_chunk(source, AppConfig())
+        self.assertEqual(result, clean)
+        self.assertEqual(mocked_post.call_count, 2)
+
+    def test_collapsed_lines_are_retried(self) -> None:
+        source = "First line\nSecond line\nThird line\nFourth line"
+        collapsed = "Первая строка, вторая строка, третья строка и четвёртая строка"
+        clean = "Первая строка\nВторая строка\nТретья строка\nЧетвёртая строка"
+        responses = [
+            {"choices": [{"message": {"content": collapsed}}]},
+            {"choices": [{"message": {"content": clean}}]},
+        ]
+        with patch("translator._post_json", side_effect=responses) as mocked_post:
+            result = _translate_chunk(source, AppConfig())
+        self.assertEqual(result, clean)
+        self.assertEqual(mocked_post.call_count, 2)
 
 
 class PdfCheckpointTests(unittest.TestCase):

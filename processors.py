@@ -255,13 +255,19 @@ def _extract_pdf_blocks(page: fitz.Page) -> list[PdfTextBlock]:
             if abs(y) > abs(x):
                 rotation = 90 if y > 0 else 270
 
+        alignment = (
+            fitz.TEXT_ALIGN_LEFT
+            if len(text_lines) >= 4
+            else _estimate_alignment(rect, line_rects)
+        )
+
         result.append(
             PdfTextBlock(
                 rect=rect,
                 text=text,
                 font_size=font_size,
                 color=color,
-                alignment=_estimate_alignment(rect, line_rects),
+                alignment=alignment,
                 rotation=rotation,
             )
         )
