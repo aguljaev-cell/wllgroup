@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from config import AppConfig
 from model_runtime import LocalModelServer, download_model, model_installed
-from processors import translate_docx, translate_pdf
+from processors import TranslationQualityError, translate_docx, translate_pdf
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -103,6 +103,7 @@ class TranslationWorker(QObject):
     progress = Signal(float, str)
     finished = Signal(str, str)
     failed = Signal(str)
+    report_ready = Signal(str)
 
     def __init__(
         self,
@@ -207,6 +208,8 @@ class TranslationWorker(QObject):
             # Полный traceback оставляем в stderr для журнала PyInstaller / GitHub,
             # пользователю показываем понятное сообщение.
             traceback.print_exc()
+            if isinstance(exc, TranslationQualityError) and exc.report.exists():
+                self.report_ready.emit(str(exc.report))
             self.failed.emit(
                 _friendly_error(exc, "Не удалось выполнить перевод файла.")
             )

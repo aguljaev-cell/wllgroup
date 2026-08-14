@@ -31,6 +31,14 @@ class PdfTextBlock:
     rotation: int = 0
 
 
+class TranslationQualityError(RuntimeError):
+    """A translation stopped safely and produced a QA report."""
+
+    def __init__(self, message: str, report: Path):
+        super().__init__(message)
+        self.report = Path(report)
+
+
 def _safe_progress(progress: Progress, value: float, message: str) -> None:
     try:
         progress(max(0.0, min(100.0, float(value))), message)
@@ -602,11 +610,12 @@ def translate_pdf(
                         source=source,
                         processed_units=processed_blocks,
                     )
-                    raise RuntimeError(
+                    raise TranslationQualityError(
                         f"Перевод остановлен на странице {page_index + 1}, "
                         f"блок {block_number}: фрагмент не прошёл контроль качества. "
                         "Исходный английский блок не был принят как готовый перевод. "
-                        f"QA-отчёт: {report}"
+                        f"QA-отчёт: {report}",
+                        report,
                     ) from exc
 
                 _safe_progress(
@@ -648,11 +657,12 @@ def translate_pdf(
                             source=source,
                             processed_units=processed_blocks,
                         )
-                        raise RuntimeError(
+                        raise TranslationQualityError(
                             f"Перевод остановлен на странице {page_index + 1}, "
                             f"блок {block_number}: русский текст не поместился в исходную область. "
                             "Страница не отмечена как завершённая. "
-                            f"QA-отчёт: {report}"
+                            f"QA-отчёт: {report}",
+                            report,
                         )
                     elif used_size < max(5.0, block.font_size * 0.55):
                         warnings.append(

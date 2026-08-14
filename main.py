@@ -550,6 +550,7 @@ class MainWindow(QMainWindow):
         if setup:
             worker.finished.connect(self.on_setup_finished)
         else:
+            worker.report_ready.connect(self.on_report_ready)
             worker.finished.connect(self.on_finished)
 
         worker.finished.connect(self.thread.quit)
@@ -632,6 +633,11 @@ class MainWindow(QMainWindow):
             f"Файл сохранён:\n{output}\n\n"
             f"Отчёт проверки:\n{report}",
         )
+
+    def on_report_ready(self, report: str) -> None:
+        self.last_report = Path(report)
+        self._append_log(f"QA-отчёт доступен: {report}")
+        self._update_state()
 
     def on_failed(self, message: str) -> None:
         self.status.setText("Ошибка")

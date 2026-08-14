@@ -9,7 +9,12 @@ import fitz
 import requests
 
 from config import APP_VERSION, AppConfig
-from processors import _checkpoint_paths, _save_checkpoint, translate_pdf
+from processors import (
+    TranslationQualityError,
+    _checkpoint_paths,
+    _save_checkpoint,
+    translate_pdf,
+)
 from translator import (
     _post_json,
     _protect_values,
@@ -25,7 +30,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.5.6")
+        self.assertEqual(APP_VERSION, "0.5.7")
         self.assertIn("1.5B", config.model_filename)
         self.assertLessEqual(config.request_timeout, 300)
         self.assertEqual(config.gpu_layer_candidates, (20, 12, 4))
@@ -298,7 +303,9 @@ class PdfCheckpointTests(unittest.TestCase):
                 "processors.translate_text",
                 side_effect=RuntimeError("untranslated English"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "Перевод остановлен"):
+                with self.assertRaisesRegex(
+                    TranslationQualityError, "Перевод остановлен"
+                ) as caught:
                     translate_pdf(
                         source,
                         destination,
@@ -310,6 +317,10 @@ class PdfCheckpointTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
             self.assertTrue(destination.with_name("result_QA_REPORT.txt").exists())
+            self.assertEqual(
+                caught.exception.report,
+                destination.with_name("result_QA_REPORT.txt"),
+            )
 
     def test_text_that_does_not_fit_stops_page_before_final_save(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -322,7 +333,7 @@ class PdfCheckpointTests(unittest.TestCase):
                 patch("processors.translate_text", return_value="Переведённый текст"),
                 patch("processors._insert_translated_text", return_value=(False, 4.5)),
             ):
-                with self.assertRaisesRegex(RuntimeError, "не поместился"):
+                with self.assertRaisesRegex(TranslationQualityError, "не поместился"):
                     translate_pdf(
                         source,
                         destination,
@@ -334,6 +345,39 @@ class PdfCheckpointTests(unittest.TestCase):
 
             self.assertFalse(destination.exists())
             self.assertTrue(destination.with_name("result_QA_REPORT.txt").exists())
+
+
+class WorkerReportSignalTests(unittest.TestCase):
+    def test_quality_failure_emits_report_path_before_failure(self) -> None:
+        try:
+            from worker import TranslationWorker
+        except ModuleNotFoundError as exc:
+            if exc.name == "PySide6":
+                self.skipTest("PySide6 is not installed in the local test runtime")
+            raise
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            destination = root / "result.pdf"
+            report = root / "result_QA_REPORT.txt"
+            source.write_bytes(b"test")
+            report.write_text("QA", encoding="utf-8")
+
+            quality_error = TranslationQualityError("quality failed", report)
+            worker = TranslationWorker(source, destination, AppConfig())
+            worker.server.start = Mock()
+            worker.server.stop = Mock()
+            reports: list[str] = []
+            failures: list[str] = []
+            worker.report_ready.connect(reports.append)
+            worker.failed.connect(failures.append)
+
+            with patch("worker.translate_pdf", side_effect=quality_error):
+                worker.run()
+
+            self.assertEqual(reports, [str(report)])
+            self.assertEqual(len(failures), 1)
 
 
 if __name__ == "__main__":
