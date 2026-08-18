@@ -30,7 +30,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.5.7")
+        self.assertEqual(APP_VERSION, "0.5.8")
         self.assertIn("1.5B", config.model_filename)
         self.assertLessEqual(config.request_timeout, 300)
         self.assertEqual(config.gpu_layer_candidates, (20, 12, 4))
@@ -66,6 +66,55 @@ class TranslationOutputSafetyTests(unittest.TestCase):
         self.assertTrue(should_translate("DECLARATION"))
         self.assertFalse(should_translate("KS-PET"))
         self.assertFalse(should_translate("PLC"))
+
+    def test_known_catalogue_heading_does_not_call_model(self) -> None:
+        with patch("translator._post_json") as mocked_post:
+            result = translate_text("CATALOGUE ONE(INJECTION)", AppConfig())
+        self.assertEqual(result, "СОДЕРЖАНИЕ. ЧАСТЬ 1 (ВПРЫСК)")
+        mocked_post.assert_not_called()
+
+    def test_catalogue_preserves_numbers_leaders_pages_and_line_count(self) -> None:
+        source = (
+            "1.3 Injection part................................................ 5\n"
+            "1.4 Clamping unit.................................................6\n"
+            "2.2 Clean........................................................ 11\n"
+            "Boot program...................................................... 26"
+        )
+        with patch("translator._post_json") as mocked_post:
+            result = translate_text(source, AppConfig())
+        self.assertEqual(
+            result,
+            "1.3 Узел впрыска................................................ 5\n"
+            "1.4 Узел смыкания.................................................6\n"
+            "2.2 Очистка........................................................ 11\n"
+            "Порядок запуска...................................................... 26",
+        )
+        self.assertEqual(len(result.splitlines()), len(source.splitlines()))
+        mocked_post.assert_not_called()
+
+    def test_unknown_catalogue_title_sends_only_title_to_model(self) -> None:
+        source = (
+            "1. Unknown first heading............................ 4\n"
+            "2. Unknown second heading........................... 5\n"
+            "3. Unknown third heading............................ 6\n"
+            "4. Unknown fourth heading........................... 7"
+        )
+        responses = [
+            {"choices": [{"message": {"content": "Неизвестный первый заголовок"}}]},
+            {"choices": [{"message": {"content": "Неизвестный второй заголовок"}}]},
+            {"choices": [{"message": {"content": "Неизвестный третий заголовок"}}]},
+            {"choices": [{"message": {"content": "Неизвестный четвёртый заголовок"}}]},
+        ]
+        with patch("translator._post_json", side_effect=responses) as mocked_post:
+            result = translate_text(source, AppConfig())
+        prompts = [
+            call.args[1]["messages"][1]["content"]
+            for call in mocked_post.call_args_list
+        ]
+        self.assertEqual(mocked_post.call_count, 4)
+        self.assertTrue(all("...." not in prompt for prompt in prompts))
+        self.assertTrue(result.startswith("1. Неизвестный первый заголовок"))
+        self.assertTrue(result.endswith("........................... 7"))
 
     def test_long_text_is_split_on_lines_and_round_trips_exactly(self) -> None:
         source = "".join(f"{index}. A table of contents row..................{index}\n" for index in range(80))

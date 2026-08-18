@@ -143,6 +143,67 @@ GLOSSARY: dict[str, str] = {
 }
 
 
+# Curated catalogue headings from the Kronce manual. The bundled 1.5B model
+# can struggle with short, ungrammatical English headings (and source typos),
+# so exact known headings are translated deterministically. This also keeps
+# catalogue page numbers and dot leaders out of the model prompt.
+EXACT_TRANSLATIONS: dict[str, str] = {
+    "catalogue one(injection)": "СОДЕРЖАНИЕ. ЧАСТЬ 1 (ВПРЫСК)",
+    "learn kronce injection molding machine system": "Изучение системы термопластавтомата Kronce",
+    "theory in kronce precision machinery injection molding system": "Теория системы литья под давлением оборудования Kronce",
+    "system assemble of kronce precision machinery": "Состав системы оборудования Kronce",
+    "injection part": "Узел впрыска",
+    "clamping unit": "Узел смыкания",
+    "robot for preform pick": "Робот для извлечения преформ",
+    "hydraulic system": "Гидравлическая система",
+    "control parts": "Система управления",
+    "heating and cooling system": "Система нагрева и охлаждения",
+    "separate-vacuum hopper loader system": "Система раздельной вакуумной загрузки бункера",
+    "machine transportation, installation and use environment": "Транспортировка, монтаж и условия эксплуатации оборудования",
+    "installation and calibration": "Монтаж и выверка",
+    "clean": "Очистка",
+    "power supply": "Электропитание",
+    "the hydraulic oil, lubricating oil and grease": "Гидравлическое и смазочное масло, консистентная смазка",
+    "cooling water system and compressed air": "Система охлаждающей воды и сжатого воздуха",
+    "oil pump test run and exaust": "Пробный запуск масляного насоса и удаление воздуха",
+    "other produce condition and auxiliary equipments": "Прочие условия производства и вспомогательное оборудование",
+    "machine safe method": "Меры безопасности при работе с оборудованием",
+    "normal safe rule": "Общие правила безопасности",
+    "safety facilities of this machine and examination before boot": "Защитные устройства оборудования и проверка перед запуском",
+    "injection molding machine general safe prevent method": "Общие меры безопасности при работе с термопластавтоматом",
+    "mold clamp unit prevent method": "Меры безопасности для узла смыкания",
+    "injection unit prevent method": "Меры безопасности для узла впрыска",
+    "hydraulic system prevent method": "Меры безопасности для гидравлической системы",
+    "electric-pneumatic system prevent method": "Меры безопасности для электропневматической системы",
+    "safe warning indicator": "Предупреждающие знаки безопасности",
+    "moveable security door warning indicator ：": "Предупреждающие знаки на подвижной защитной двери:",
+    "injection system warning indicator": "Предупреждающие знаки системы впрыска",
+    "machine adjust and operate": "Наладка и эксплуатация оборудования",
+    "preparation": "Подготовка",
+    "machine adjust": "Наладка оборудования",
+    "machine running operate": "Эксплуатация оборудования",
+    "manual operate": "Ручной режим",
+    "simi-auto operate": "Полуавтоматический режим",
+    "automatic operate": "Автоматический режим",
+    "boot program": "Порядок запуска",
+    "shut down sequence": "Порядок остановки",
+    "periodical check and maintenance": "Периодические проверки и техническое обслуживание",
+    "check and maintenance every day": "Ежедневные проверки и техническое обслуживание",
+    "check and maintenance every week": "Еженедельные проверки и техническое обслуживание",
+    "check and maintenance every month": "Ежемесячные проверки и техническое обслуживание",
+    "check and maintenance every year": "Ежегодные проверки и техническое обслуживание",
+    "maintenance for the system": "Техническое обслуживание системы",
+    "main tenancy for the electric system": "Техническое обслуживание электрической системы",
+    "maintenance for hydraulic system": "Техническое обслуживание гидравлической системы",
+    "maintenance for mold clamp system": "Техническое обслуживание системы смыкания пресс-формы",
+    "maintenance for injection system": "Техническое обслуживание системы впрыска",
+    "common fault and handling method": "Типовые неисправности и способы их устранения",
+    "oil pump motor noise": "Шум электродвигателя масляного насоса",
+    "motor stop working": "Остановка электродвигателя",
+    "oil pump rotate but the pressure is wrong or no pressure": "Насос работает, но давление отсутствует или не соответствует норме",
+}
+
+
 BAD_TRANSLATIONS: tuple[str, ...] = (
     "кламп",
     "инъекция guidance",
@@ -194,6 +255,13 @@ _PROMPT_LEAK_MARKERS: tuple[str, ...] = (
     "только русский перевод следующего текста",
     "обязательные правила:",
     "предпочтительная терминология:",
+)
+
+_TOC_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*(?:\d+(?:\.\d+)*\.?\s+)?)"
+    r"(?P<title>.*?)"
+    r"(?P<leader>\.{3,}\s*)"
+    r"(?P<page>\d+)\s*$"
 )
 
 _PROTECTED_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -367,6 +435,57 @@ def _restore_values(text: str, values: dict[str, str]) -> str:
     for token, value in values.items():
         restored = restored.replace(token, value)
     return restored
+
+
+def _exact_translation(text: str) -> str | None:
+    """Return a curated translation while preserving outer whitespace."""
+    stripped = text.strip()
+    translated = EXACT_TRANSLATIONS.get(stripped.casefold())
+    if translated is None:
+        translated = GLOSSARY.get(stripped.casefold())
+    if translated is None:
+        return None
+
+    leading = text[: len(text) - len(text.lstrip())]
+    trailing = text[len(text.rstrip()):]
+    return leading + translated + trailing
+
+
+def _translate_catalogue(text: str, config: AppConfig) -> str | None:
+    """Translate TOC headings without sending dot leaders or page numbers."""
+    lines = text.splitlines()
+    if len(lines) < 4:
+        return None
+
+    parsed = [_TOC_LINE_RE.fullmatch(line) for line in lines]
+    matched = sum(match is not None for match in parsed)
+    if matched < max(4, (len(lines) * 3 + 4) // 5):
+        return None
+
+    translated_lines: list[str] = []
+    for line, match in zip(lines, parsed):
+        if match is None:
+            exact = _exact_translation(line)
+            translated_lines.append(exact or _translate_resilient(line, config))
+            continue
+
+        title = match.group("title").strip()
+        translated_title = _exact_translation(title)
+        if translated_title is None:
+            translated_title = _translate_resilient(title, config).strip()
+
+        translated_lines.append(
+            match.group("prefix")
+            + translated_title
+            + match.group("leader")
+            + match.group("page")
+        )
+
+    translated = "\n".join(translated_lines)
+    if len(translated.splitlines()) != len(lines):
+        raise RuntimeError("При переводе оглавления изменилось число строк")
+    _validate_model_translation(text, translated)
+    return translated
 
 
 def _build_user_prompt(text: str) -> str:
@@ -633,6 +752,14 @@ def _translate_resilient(
 def translate_text(text: str, config: AppConfig) -> str:
     if not should_translate(text):
         return text
+
+    exact = _exact_translation(text)
+    if exact is not None:
+        return exact
+
+    catalogue = _translate_catalogue(text, config)
+    if catalogue is not None:
+        return catalogue
 
     translated_chunks: list[str] = []
 
