@@ -318,7 +318,7 @@ class MainWindow(QMainWindow):
             self.runtime_status.setObjectName("runtimeReady")
         else:
             self.runtime_status.setText(
-                "Для первого запуска требуется загрузка облегчённой модели (~1 ГБ)"
+                "Для первого запуска требуется загрузка TranslateGemma (~2,5 ГБ)"
             )
             self.runtime_status.setObjectName("runtimeMissing")
 
@@ -434,7 +434,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Загрузка модели",
-            "Будет загружена облегчённая модель около 1 ГБ. После установки перевод "
+            "Будет загружена модель TranslateGemma около 2,5 ГБ. После установки перевод "
             "будет работать локально.\n\nПродолжить?",
         )
         if answer == QMessageBox.StandardButton.Yes:

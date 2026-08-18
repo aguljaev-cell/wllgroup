@@ -18,6 +18,7 @@ from processors import (
 from translator import (
     _post_json,
     _protect_values,
+    _reflow_to_source_lines,
     _restore_values,
     _translate_chunk,
     qa_text,
@@ -30,10 +31,11 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.5.8")
-        self.assertIn("1.5B", config.model_filename)
+        self.assertEqual(APP_VERSION, "0.6.0")
+        self.assertIn("translategemma-4b-it", config.model_filename)
+        self.assertEqual(config.model_size, 2_489_909_760)
         self.assertLessEqual(config.request_timeout, 300)
-        self.assertEqual(config.gpu_layer_candidates, (20, 12, 4))
+        self.assertEqual(config.gpu_layer_candidates, (28, 20, 12, 4))
 
 
 class TimeoutTests(unittest.TestCase):
@@ -59,8 +61,31 @@ class ProtectedValueTests(unittest.TestCase):
         self.assertFalse(any("WLL_" in value for value in protected.values.values()))
         self.assertEqual(_restore_values(protected.text, protected.values), source)
 
+    def test_standalone_pdf_bullet_is_protected_and_normalized(self) -> None:
+        source = "  ●  \n25 MPa"
+        protected = _protect_values(source)
+        self.assertEqual(len(protected.values), 2)
+        self.assertEqual(_restore_values(protected.text, protected.values), "  •  \n25 MPa")
+
 
 class TranslationOutputSafetyTests(unittest.TestCase):
+    def test_line_reflow_restores_source_geometry(self) -> None:
+        source = "First long source line\nSecond source line\nThird line"
+        result = _reflow_to_source_lines(
+            source,
+            "Первая длинная строка, вторая строка и третья строка",
+        )
+        self.assertEqual(len(result.splitlines()), 3)
+
+    def test_rejected_short_fragment_uses_packaged_fallback(self) -> None:
+        with (
+            patch("translator._translate_chunk", side_effect=RuntimeError("rejected")),
+            patch("translator._translate_with_opus", return_value="Температура масла") as fallback,
+        ):
+            result = translate_text("Oil temperature", AppConfig())
+        self.assertEqual(result, "Температура масла")
+        fallback.assert_called_once_with("Oil temperature")
+
     def test_natural_all_caps_heading_is_translated_but_code_is_not(self) -> None:
         self.assertTrue(should_translate("CATALOGUE ONE (INJECTION)"))
         self.assertTrue(should_translate("DECLARATION"))
@@ -108,7 +133,7 @@ class TranslationOutputSafetyTests(unittest.TestCase):
         with patch("translator._post_json", side_effect=responses) as mocked_post:
             result = translate_text(source, AppConfig())
         prompts = [
-            call.args[1]["messages"][1]["content"]
+            call.args[1]["messages"][-1]["content"]
             for call in mocked_post.call_args_list
         ]
         self.assertEqual(mocked_post.call_count, 4)

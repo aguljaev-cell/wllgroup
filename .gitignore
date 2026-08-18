@@ -5,3 +5,8 @@ build-temp/
 dist/
 release/*.exe
 models/*.gguf
+vendor/opus/
+vendor/m2m100-418m-int8/
+vendor/translategemma/
+test-runtime/
+tmp/

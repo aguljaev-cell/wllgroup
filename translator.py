@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -246,6 +248,7 @@ _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?%)\]])")
 _MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
 _PLACEHOLDER_RE = re.compile(r"⟦WLL_\d{4}⟧")
 _PLACEHOLDER_BODY_RE = re.compile(r"WLL_\d{4}")
+_BULLET_RE = re.compile(r"(?m)^(?P<left>[ \t]*)[•●▪◦](?P<right>[ \t]*)$")
 
 _PROMPT_LEAK_MARKERS: tuple[str, ...] = (
     "исходный текст:",
@@ -404,6 +407,16 @@ def _protect_values(text: str) -> _ProtectedText:
     values: dict[str, str] = {}
     protected = text
 
+    # PDF extractors often return a bullet as its own text block.  Keep that
+    # structural marker outside both translation engines and normalize it to
+    # the standard bullet used when writing the result.
+    def replace_bullet(match: re.Match[str]) -> str:
+        token = f"⟦WLL_{len(values) + 1:04d}⟧"
+        values[token] = match.group("left") + "•" + match.group("right")
+        return token
+
+    protected = _BULLET_RE.sub(replace_bullet, protected)
+
     for pattern in _PROTECTED_PATTERNS:
         def replace(match: re.Match[str]) -> str:
             value = match.group(0)
@@ -489,15 +502,75 @@ def _translate_catalogue(text: str, config: AppConfig) -> str | None:
 
 
 def _build_user_prompt(text: str) -> str:
+    glossary = _glossary_for_text(text)
+    terms = ""
+    if glossary:
+        terms = (
+            "\nUse these technical terms exactly:\n"
+            + "\n".join(f"- {source} = {target}" for source, target in glossary)
+            + "\n"
+        )
     return (
-        "Переведи текст ниже на русский язык. "
-        "Выведи только перевод, без задания и исходного текста.\n\n"
-        f"{text}"
+        "You are a professional technical translator. Translate the following "
+        "industrial documentation from English or Chinese into Russian. "
+        "Return only the Russian translation. Preserve every line break, list "
+        "marker and protected token such as ⟦WLL_0001⟧. Do not add explanations."
+        f"{terms}\nText to translate:\n{text}"
     )
 
 
 def _build_retry_prompt(text: str) -> str:
-    return f"Только русский перевод следующего текста, без пояснений:\n{text}"
+    return (
+        "Translate this technical text into Russian. Output the translation "
+        "only, with exactly the same number of lines and unchanged protected "
+        f"tokens.\n\n{text}"
+    )
+
+
+def _glossary_for_text(text: str) -> list[tuple[str, str]]:
+    lowered = text.casefold()
+    matches = [
+        (source, target)
+        for source, target in GLOSSARY.items()
+        if source in lowered
+    ]
+    return sorted(matches, key=lambda item: (-len(item[0]), item[0]))
+
+
+def _reflow_to_source_lines(source: str, translated: str) -> str:
+    """Deterministically restore the line geometry of a PDF text block."""
+    source_lines = source.splitlines()
+    if len(source_lines) <= 1:
+        return translated.strip()
+    if len(translated.splitlines()) == len(source_lines):
+        return translated.strip()
+
+    words = re.sub(r"\s+", " ", translated).strip().split(" ")
+    if not words:
+        return translated.strip()
+
+    nonempty_indexes = [i for i, line in enumerate(source_lines) if line.strip()]
+    if not nonempty_indexes:
+        return translated.strip()
+
+    weights = [max(1, len(source_lines[i].strip())) for i in nonempty_indexes]
+    result = ["" for _ in source_lines]
+    cursor = 0
+    remaining_weight = sum(weights)
+
+    for position, (line_index, weight) in enumerate(zip(nonempty_indexes, weights)):
+        remaining_lines = len(nonempty_indexes) - position
+        remaining_words = len(words) - cursor
+        if remaining_lines == 1:
+            take = remaining_words
+        else:
+            take = round(remaining_words * weight / max(remaining_weight, 1))
+            take = max(1, min(take, remaining_words - (remaining_lines - 1)))
+        result[line_index] = " ".join(words[cursor:cursor + take])
+        cursor += take
+        remaining_weight -= weight
+
+    return "\n".join(result)
 
 
 def _prompt_leak_markers(text: str) -> list[str]:
@@ -533,6 +606,16 @@ def _source_echo_is_excessive(source: str, translated: str) -> bool:
 
 
 def _validate_model_translation(source: str, translated: str) -> None:
+    if _PLACEHOLDER_RE.search(translated):
+        raise RuntimeError("В ответе модели остались внутренние маркеры защиты")
+
+    source_bullets = len(re.findall(r"[•●▪◦]", source))
+    result_bullets = translated.count("•")
+    if source_bullets != result_bullets:
+        raise RuntimeError(
+            "Модель изменила число маркеров списка "
+            f"({source_bullets} → {result_bullets})"
+        )
     leaked = _prompt_leak_markers(translated)
     if leaked:
         raise RuntimeError("Модель повторила служебный текст задания")
@@ -645,7 +728,6 @@ def _translate_chunk(text: str, config: AppConfig) -> str:
     for attempt, user_prompt in enumerate(prompts):
         payload: dict[str, Any] = {
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.0 if attempt else float(getattr(config, "temperature", 0.1)),
@@ -675,12 +757,130 @@ def _translate_chunk(text: str, config: AppConfig) -> str:
                     + ", ".join(missing[:5])
                 )
             _validate_model_translation(text, translated)
+            translated = _reflow_to_source_lines(text, translated)
+            _validate_model_translation(text, translated)
             return translated or text
         except RuntimeError as exc:
             last_error = exc
 
     assert last_error is not None
     raise last_error
+
+
+@lru_cache(maxsize=1)
+def _opus_runtime() -> tuple[Any, Any, Any]:
+    """Load the compact packaged translator only when it is actually needed."""
+    try:
+        import ctranslate2
+        import sentencepiece
+    except ImportError as exc:
+        raise RuntimeError("Резервный переводчик OPUS-MT недоступен") from exc
+
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    model_dir = root / "vendor" / "opus"
+    required = (model_dir / "model.bin", model_dir / "source.spm", model_dir / "target.spm")
+    missing = [path.name for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError(
+            "В сборке отсутствуют файлы резервного переводчика: "
+            + ", ".join(missing)
+        )
+
+    engine = ctranslate2.Translator(
+        str(model_dir),
+        device="cpu",
+        compute_type="int8",
+        inter_threads=1,
+    )
+    source_sp = sentencepiece.SentencePieceProcessor(model_file=str(model_dir / "source.spm"))
+    target_sp = sentencepiece.SentencePieceProcessor(model_file=str(model_dir / "target.spm"))
+    return engine, source_sp, target_sp
+
+
+def _opus_translate_plain(text: str) -> str:
+    leading_match = re.match(r"^\s*", text)
+    trailing_match = re.search(r"\s*$", text)
+    leading = leading_match.group(0) if leading_match else ""
+    trailing = trailing_match.group(0) if trailing_match else ""
+    core_end = len(text) - len(trailing) if trailing else len(text)
+    core = text[len(leading):core_end]
+
+    if not should_translate(core):
+        return text
+    exact = _exact_translation(core)
+    if exact is not None:
+        return leading + exact + trailing
+
+    engine, source_sp, target_sp = _opus_runtime()
+    # MarianTokenizer appends EOS before inference. SentencePiece alone does
+    # not, and omitting it makes Marian loop on repeated words.
+    tokens = source_sp.encode(core, out_type=str) + ["</s>"]
+    if not tokens:
+        return text
+    max_length = max(32, min(512, len(tokens) * 4 + 16))
+    result = engine.translate_batch(
+        [tokens],
+        beam_size=4,
+        max_decoding_length=max_length,
+    )[0]
+    hypothesis = result.hypotheses[0]
+    translated = _clean_model_output(target_sp.decode(hypothesis))
+
+    lowered = core.casefold()
+    if "clamping cylinder" in lowered:
+        translated = re.sub(
+            r"^Зажимн(?:ый|ого) цилиндр",
+            "Гидроцилиндр смыкания",
+            translated,
+            flags=re.IGNORECASE,
+        )
+    if "mold closing" in lowered:
+        translated = re.sub(
+            r"закрыт(?:ие|ия) (?:плесени|формы)",
+            "смыкание пресс-формы",
+            translated,
+            flags=re.IGNORECASE,
+        )
+    if "pet preform" in lowered:
+        translated = re.sub(
+            r"(?:предформ(?:у|а|ы)?\s+PET|PET\s+предформ(?:у|а|ы)?)",
+            "ПЭТ-преформу",
+            translated,
+            flags=re.IGNORECASE,
+        )
+    if "oil pressure" in lowered:
+        translated = re.sub(
+            r"давление в масле",
+            "давление масла",
+            translated,
+            flags=re.IGNORECASE,
+        )
+
+    return leading + (translated or core) + trailing
+
+
+def _translate_with_opus(text: str) -> str:
+    """No-stop emergency path with structural and technical tokens preserved."""
+    protected = _protect_values(text)
+    output_lines: list[str] = []
+    for line in protected.text.splitlines(keepends=True):
+        newline = "\n" if line.endswith("\n") else ""
+        body = line[:-1] if newline else line
+        parts = re.split(f"({_PLACEHOLDER_RE.pattern})", body)
+        translated_parts: list[str] = []
+        for part in parts:
+            if not part:
+                continue
+            if _PLACEHOLDER_RE.fullmatch(part):
+                translated_parts.append(part)
+            else:
+                translated_parts.append(_opus_translate_plain(part))
+        output_lines.append("".join(translated_parts) + newline)
+
+    translated = _restore_values("".join(output_lines), protected.values)
+    translated = _reflow_to_source_lines(text, translated)
+    _validate_model_translation(text, translated)
+    return translated
 
 
 def _retry_split_position(text: str) -> int | None:
@@ -730,13 +930,11 @@ def _translate_resilient(
         return leading + _translate_chunk(core, config) + trailing
     except RuntimeError as original_error:
         if depth >= max_depth:
-            raise RuntimeError(
-                "Фрагмент не прошёл проверку качества после дробления"
-            ) from original_error
+            return leading + _translate_with_opus(core) + trailing
 
         position = _retry_split_position(core)
         if position is None:
-            raise
+            return leading + _translate_with_opus(core) + trailing
 
         left = _translate_resilient(
             core[:position], config, depth=depth + 1, max_depth=max_depth
@@ -761,19 +959,23 @@ def translate_text(text: str, config: AppConfig) -> str:
     if catalogue is not None:
         return catalogue
 
-    translated_chunks: list[str] = []
+    try:
+        translated_chunks: list[str] = []
 
-    for chunk in split_long_text(text):
-        if should_translate(chunk):
-            translated_chunks.append(_translate_resilient(chunk, config))
-        else:
-            translated_chunks.append(chunk)
+        for chunk in split_long_text(text):
+            if should_translate(chunk):
+                translated_chunks.append(_translate_resilient(chunk, config))
+            else:
+                translated_chunks.append(chunk)
 
-    translated = "".join(translated_chunks)
-    if translated.strip():
-        _validate_model_translation(text, translated)
-        return translated
-    return text
+        translated = "".join(translated_chunks)
+        if translated.strip():
+            translated = _reflow_to_source_lines(text, translated)
+            _validate_model_translation(text, translated)
+            return translated
+        return text
+    except RuntimeError:
+        return _translate_with_opus(text)
 
 
 def qa_text(

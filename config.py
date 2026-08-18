@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 APP_NAME = "PDFMathTranslate WLL"
-APP_VERSION = "0.5.8"
+APP_VERSION = "0.6.0"
 ORGANIZATION_NAME = "WorldLogicLine"
 
 def _default_local_app_data() -> Path:
@@ -46,17 +46,17 @@ def _default_threads() -> int:
 @dataclass(slots=True)
 class AppConfig:
     model_url: str = (
-        "https://huggingface.co/bartowski/"
-        "Qwen2.5-1.5B-Instruct-GGUF/resolve/"
-        "02938d9fe88f34a3a9960128b5092f20940e7553/"
-        "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf?download=true"
+        "https://huggingface.co/mradermacher/"
+        "translategemma-4b-it-GGUF/resolve/"
+        "35a7486e128b19642cdc72d7b91b21ba388aaf42/"
+        "translategemma-4b-it.Q4_K_M.gguf?download=true"
     )
-    model_filename: str = "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+    model_filename: str = "translategemma-4b-it.Q4_K_M.gguf"
 
-    model_size: int | None = None
+    model_size: int | None = 2_489_909_760
     model_sha256: str | None = (
-        "50961d9b7d3b89e46be230528fc66d38"
-        "bbdda8ac3748323dd34f129a714124fc"
+        "81200d03e843d2ec1ece6eeafe7d13cb"
+        "6e5211e1fcd336ade55790b683a08330"
     )
 
     server_host: str = "127.0.0.1"
@@ -65,8 +65,8 @@ class AppConfig:
     context_size: int = 4096
     batch_size: int = 128
     threads: int = 0
-    gpu_layers: int = 20
-    gpu_layer_candidates: tuple[int, ...] = (20, 12, 4)
+    gpu_layers: int = 28
+    gpu_layer_candidates: tuple[int, ...] = (28, 20, 12, 4)
 
     temperature: float = 0.05
     request_timeout: int = 300

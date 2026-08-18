@@ -262,6 +262,12 @@ class LocalModelServer:
             str(threads),
             "--batch-size",
             str(batch_size),
+            # TranslateGemma ships a structured multimodal Jinja template
+            # that older llama.cpp builds cannot parse.  Translation uses a
+            # purpose-built text prompt with the stable Gemma chat template.
+            "--no-jinja",
+            "--chat-template",
+            "gemma",
         ]
 
     def _start_process(self, args: list[str]) -> None:

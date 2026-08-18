@@ -12,15 +12,18 @@ root = Path(SPECPATH)
 
 datas = [
     (str(root / "vendor" / "llama"), "vendor/llama"),
+    (str(root / "vendor" / "opus"), "vendor/opus"),
 ]
 
 # Данные библиотек, которые могут понадобиться после упаковки.
 datas += collect_data_files("certifi")
 datas += collect_data_files("fitz")
 datas += collect_data_files("docx")
+datas += collect_data_files("sentencepiece")
 
 binaries = []
 binaries += collect_dynamic_libs("PySide6")
+binaries += collect_dynamic_libs("ctranslate2")
 
 hiddenimports = [
     "fitz",
@@ -28,6 +31,8 @@ hiddenimports = [
     "docx",
     "requests",
     "certifi",
+    "ctranslate2",
+    "sentencepiece",
 ]
 hiddenimports += collect_submodules("PySide6")
 
