@@ -91,8 +91,14 @@ jobs:
 
       - name: Download llama.cpp Vulkan and CPU runtimes
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $headers = @{ 'User-Agent' = 'PDFMathTranslate-WLL' }
+          $headers = @{
+            'User-Agent' = 'PDFMathTranslate-WLL'
+            'Authorization' = "Bearer $env:GITHUB_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
           $release = Invoke-RestMethod `
             -Headers $headers `
             -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10369'
