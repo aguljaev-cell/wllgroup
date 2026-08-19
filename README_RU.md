@@ -2,6 +2,8 @@
 
 Windows-приложение для технического перевода PDF и DOCX на русский язык.
 
+Установщик без ZIP: [PDFMathTranslate_WLL_Setup_v0_6_1.exe](https://github.com/aguljaev-cell/wllgroup/releases/download/v0.6.1/PDFMathTranslate_WLL_Setup_v0_6_1.exe)
+
 ## Что изменилось в v0.6.1
 
 - Один проблемный фрагмент больше не останавливает перевод всего PDF.

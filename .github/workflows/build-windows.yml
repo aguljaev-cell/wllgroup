@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -297,3 +297,29 @@ jobs:
             release/PDFMathTranslate_WLL_Setup_v0_6_1.exe
             release/SHA256SUMS.txt
           retention-days: 14
+
+      - name: Publish public release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = 'v0.6.1'
+          $repository = $env:GITHUB_REPOSITORY
+          $assets = @(
+            'release/PDFMathTranslate_WLL_Setup_v0_6_1.exe',
+            'release/SHA256SUMS.txt'
+          )
+
+          gh release view $tag --repo $repository *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $assets `
+              --repo $repository `
+              --clobber
+          }
+          else {
+            gh release create $tag $assets `
+              --repo $repository `
+              --target $env:GITHUB_SHA `
+              --title 'PDFMathTranslate WLL 0.6.1' `
+              --notes 'Исправлена остановка большого PDF на одном проблемном блоке. Добавлено продолжение обработки, сохранение исходной страницы при проблеме размещения и контрольные точки после каждой страницы.'
+          }
