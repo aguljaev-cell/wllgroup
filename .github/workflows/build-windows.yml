@@ -223,7 +223,7 @@ jobs:
 
           @'
           #define MyAppName "PDFMathTranslate WLL"
-          #define MyAppVersion "0.6.0"
+          #define MyAppVersion "0.6.1"
           #define MyAppPublisher "WorldLogicLine"
           #define MyAppExeName "PDFMathTranslate_WLL.exe"
 
@@ -235,7 +235,7 @@ jobs:
           DefaultDirName={localappdata}\Programs\PDFMathTranslate WLL
           DefaultGroupName={#MyAppName}
           OutputDir=..\release
-          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_0
+          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_1
           Compression=lzma2/ultra64
           SolidCompression=yes
           WizardStyle=modern
@@ -270,7 +270,7 @@ jobs:
         shell: pwsh
         run: |
           $file = Get-Item `
-            release/PDFMathTranslate_WLL_Setup_v0_6_0.exe
+            release/PDFMathTranslate_WLL_Setup_v0_6_1.exe
 
           $hash = (
             Get-FileHash `
@@ -286,8 +286,8 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: PDFMathTranslate_WLL_Windows_v0_6_0
+          name: PDFMathTranslate_WLL_Windows_v0_6_1
           path: |
-            release/PDFMathTranslate_WLL_Setup_v0_6_0.exe
+            release/PDFMathTranslate_WLL_Setup_v0_6_1.exe
             release/SHA256SUMS.txt
           retention-days: 14

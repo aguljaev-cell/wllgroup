@@ -31,7 +31,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.6.0")
+        self.assertEqual(APP_VERSION, "0.6.1")
         self.assertIn("translategemma-4b-it", config.model_filename)
         self.assertEqual(config.model_size, 2_489_909_760)
         self.assertLessEqual(config.request_timeout, 300)
@@ -366,37 +366,47 @@ class PdfCheckpointTests(unittest.TestCase):
             with fitz.open(str(destination)) as result:
                 self.assertIn("Checkpointed", result[0].get_text())
 
-    def test_failed_block_stops_pdf_instead_of_saving_english_source(self) -> None:
+    def test_failed_block_is_reported_and_following_pages_continue(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "source.pdf"
             destination = root / "result.pdf"
             self._make_pdf(source)
 
-            with patch(
-                "processors.translate_text",
-                side_effect=RuntimeError("untranslated English"),
+            calls = 0
+
+            def translate_or_fail(text: str, config: AppConfig) -> str:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("untranslated English")
+                return "Переведено"
+
+            with (
+                patch("processors.translate_text", side_effect=translate_or_fail),
+                patch("processors._translation_fits", return_value=True),
+                patch("processors._insert_translated_text", return_value=(True, 8.0)),
             ):
-                with self.assertRaisesRegex(
-                    TranslationQualityError, "Перевод остановлен"
-                ) as caught:
-                    translate_pdf(
-                        source,
-                        destination,
-                        AppConfig(),
-                        lambda value, message: None,
-                        page_start=1,
-                        page_end=1,
-                    )
+                report = translate_pdf(
+                    source,
+                    destination,
+                    AppConfig(),
+                    lambda value, message: None,
+                    page_start=1,
+                    page_end=3,
+                )
 
-            self.assertFalse(destination.exists())
-            self.assertTrue(destination.with_name("result_QA_REPORT.txt").exists())
-            self.assertEqual(
-                caught.exception.report,
-                destination.with_name("result_QA_REPORT.txt"),
+            self.assertEqual(calls, 3)
+            self.assertTrue(destination.exists())
+            self.assertTrue(report.exists())
+            self.assertIn(
+                "обработка документа продолжена",
+                report.read_text(encoding="utf-8"),
             )
+            with fitz.open(str(destination)) as result:
+                self.assertIn("First page", result[0].get_text())
 
-    def test_text_that_does_not_fit_stops_page_before_final_save(self) -> None:
+    def test_text_that_does_not_fit_keeps_source_and_continues(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "source.pdf"
@@ -405,20 +415,96 @@ class PdfCheckpointTests(unittest.TestCase):
 
             with (
                 patch("processors.translate_text", return_value="Переведённый текст"),
-                patch("processors._insert_translated_text", return_value=(False, 4.5)),
+                patch("processors._translation_fits", return_value=False),
             ):
-                with self.assertRaisesRegex(TranslationQualityError, "не поместился"):
-                    translate_pdf(
-                        source,
-                        destination,
-                        AppConfig(),
-                        lambda value, message: None,
-                        page_start=1,
-                        page_end=1,
-                    )
+                report = translate_pdf(
+                    source,
+                    destination,
+                    AppConfig(),
+                    lambda value, message: None,
+                    page_start=1,
+                    page_end=3,
+                )
 
-            self.assertFalse(destination.exists())
-            self.assertTrue(destination.with_name("result_QA_REPORT.txt").exists())
+            self.assertTrue(destination.exists())
+            self.assertIn(
+                "исходный блок сохранён",
+                report.read_text(encoding="utf-8"),
+            )
+            with fitz.open(str(destination)) as result:
+                self.assertIn("First page", result[0].get_text())
+
+    def test_unexpected_insert_failure_restores_original_page(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            destination = root / "result.pdf"
+            self._make_pdf(source)
+
+            with (
+                patch("processors.translate_text", return_value="Переведённый текст"),
+                patch("processors._translation_fits", return_value=True),
+                patch("processors._insert_translated_text", return_value=(False, 3.5)),
+            ):
+                report = translate_pdf(
+                    source,
+                    destination,
+                    AppConfig(),
+                    lambda value, message: None,
+                    page_start=1,
+                    page_end=3,
+                )
+
+            self.assertTrue(destination.exists())
+            self.assertIn(
+                "исходная страница восстановлена",
+                report.read_text(encoding="utf-8"),
+            )
+            with fitz.open(str(destination)) as result:
+                self.assertIn("First page", result[0].get_text())
+                self.assertIn("Third page", result[2].get_text())
+
+    def test_ten_page_job_does_not_abort_on_page_seven(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.pdf"
+            destination = root / "result.pdf"
+            doc = fitz.open()
+            for index in range(1, 11):
+                page = doc.new_page()
+                page.insert_text((72, 72), f"Source page {index}")
+            doc.save(str(source))
+            doc.close()
+
+            translated_pages: list[int] = []
+
+            def translate_with_page_seven_failure(text: str, config: AppConfig) -> str:
+                page_number = int(text.rsplit(" ", 1)[-1])
+                translated_pages.append(page_number)
+                if page_number == 7:
+                    raise RuntimeError("simulated rejected fragment")
+                return f"Переведена страница {page_number}"
+
+            with (
+                patch(
+                    "processors.translate_text",
+                    side_effect=translate_with_page_seven_failure,
+                ),
+                patch("processors._translation_fits", return_value=True),
+                patch("processors._insert_translated_text", return_value=(True, 8.0)),
+            ):
+                report = translate_pdf(
+                    source,
+                    destination,
+                    AppConfig(),
+                    lambda value, message: None,
+                    page_start=1,
+                    page_end=10,
+                )
+
+            self.assertEqual(translated_pages, list(range(1, 11)))
+            self.assertTrue(destination.exists())
+            self.assertIn("страница 7", report.read_text(encoding="utf-8"))
 
 
 class WorkerReportSignalTests(unittest.TestCase):

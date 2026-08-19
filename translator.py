@@ -859,8 +859,13 @@ def _opus_translate_plain(text: str) -> str:
     return leading + (translated or core) + trailing
 
 
-def _translate_with_opus(text: str) -> str:
-    """No-stop emergency path with structural and technical tokens preserved."""
+def _translate_with_opus(text: str, *, strict: bool = True) -> str:
+    """Emergency path with structural and technical tokens preserved.
+
+    The main model is checked strictly.  OPUS-MT is the final local fallback,
+    so callers may request a best-effort result when a harmless residual Latin
+    product name would otherwise abort a many-page job.
+    """
     protected = _protect_values(text)
     output_lines: list[str] = []
     for line in protected.text.splitlines(keepends=True):
@@ -879,7 +884,8 @@ def _translate_with_opus(text: str) -> str:
 
     translated = _restore_values("".join(output_lines), protected.values)
     translated = _reflow_to_source_lines(text, translated)
-    _validate_model_translation(text, translated)
+    if strict:
+        _validate_model_translation(text, translated)
     return translated
 
 
@@ -975,7 +981,14 @@ def translate_text(text: str, config: AppConfig) -> str:
             return translated
         return text
     except RuntimeError:
-        return _translate_with_opus(text)
+        try:
+            return _translate_with_opus(text)
+        except RuntimeError:
+            # A strict QA rule (for example, a Latin product name mixed into a
+            # Russian sentence) must not turn one block into a fatal error for
+            # a 300-page document.  The PDF processor records remaining QA
+            # warnings and continues page by page.
+            return _translate_with_opus(text, strict=False)
 
 
 def qa_text(

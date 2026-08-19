@@ -302,7 +302,7 @@ def _insert_translated_text(
     fontname = "wllfont" if fontfile else "helv"
 
     start_size = min(max(block.font_size, 6.0), 22.0)
-    minimum_size = 4.5
+    minimum_size = 3.5
     size = start_size
 
     rect = _expanded_rect(block.rect, page.rect, margin=0.5)
@@ -325,7 +325,7 @@ def _insert_translated_text(
         size -= 0.35
 
     # Последняя попытка в слегка увеличенной области, не выходящей за страницу.
-    fallback_rect = _expanded_rect(block.rect, page.rect, margin=2.0)
+    fallback_rect = _expanded_rect(block.rect, page.rect, margin=2.5)
     result = page.insert_textbox(
         fallback_rect,
         text,
@@ -334,11 +334,24 @@ def _insert_translated_text(
         fontfile=fontfile,
         align=block.alignment,
         color=block.color,
-        lineheight=0.95,
+        lineheight=0.88,
         rotate=block.rotation,
         overlay=True,
     )
     return result >= 0, minimum_size
+
+
+def _translation_fits(page_rect: fitz.Rect, block: PdfTextBlock, text: str) -> bool:
+    """Check layout on a disposable page before the source block is redacted."""
+    probe = fitz.open()
+    try:
+        page = probe.new_page(width=page_rect.width, height=page_rect.height)
+        inserted, _ = _insert_translated_text(page, block, text)
+        return inserted
+    except Exception:
+        return False
+    finally:
+        probe.close()
 
 
 def _page_has_images(page: fitz.Page) -> bool:
@@ -584,13 +597,13 @@ def translate_pdf(
                 )
                 continue
 
-            # Сначала переводим всю страницу. При ошибке страницу не изменяем и
-            # не сохраняем как завершённую, чтобы повторный запуск начал с неё.
-            translated_blocks: list[tuple[PdfTextBlock, str]] = []
+            # Ошибка одного блока не должна останавливать большой документ.
+            # Неудачный блок остаётся в оригинале и фиксируется в QA-отчёте.
+            translated_blocks: list[tuple[int, PdfTextBlock, str]] = []
             for block_number, block in enumerate(blocks, start=1):
                 try:
                     translated = translate_text(block.text, config)
-                    translated_blocks.append((block, translated))
+                    translated_blocks.append((block_number, block, translated))
                     warnings.extend(
                         qa_text(
                             translated,
@@ -599,24 +612,11 @@ def translate_pdf(
                         ).warnings
                     )
                 except Exception as exc:
-                    warning = (
+                    warnings.append(
                         f"PDF, страница {page_index + 1}, блок {block_number}: "
-                        f"ошибка перевода — {exc}"
+                        f"ошибка перевода — {exc}; исходный блок оставлен без "
+                        "изменения, обработка документа продолжена"
                     )
-                    warnings.append(warning)
-                    report = _write_qa_report(
-                        destination,
-                        warnings,
-                        source=source,
-                        processed_units=processed_blocks,
-                    )
-                    raise TranslationQualityError(
-                        f"Перевод остановлен на странице {page_index + 1}, "
-                        f"блок {block_number}: фрагмент не прошёл контроль качества. "
-                        "Исходный английский блок не был принят как готовый перевод. "
-                        f"QA-отчёт: {report}",
-                        report,
-                    ) from exc
 
                 _safe_progress(
                     progress,
@@ -632,43 +632,66 @@ def translate_pdf(
                 )
 
             if translated_blocks:
+                insertable_blocks: list[tuple[int, PdfTextBlock, str]] = []
+                for block_number, block, translated in translated_blocks:
+                    if _translation_fits(page.rect, block, translated):
+                        insertable_blocks.append((block_number, block, translated))
+                    else:
+                        warnings.append(
+                            f"PDF, страница {page_index + 1}, блок {block_number}: "
+                            "русский текст не помещается в исходную область; "
+                            "исходный блок сохранён, обработка документа продолжена"
+                        )
+
                 # Удаляем только успешно переведённые блоки.
-                for block, _ in translated_blocks:
+                for _, block, _ in insertable_blocks:
                     page.add_redact_annot(
                         _expanded_rect(block.rect, page.rect, margin=0.4),
                         fill=(1, 1, 1),
                     )
 
-                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+                if insertable_blocks:
+                    original_page = fitz.open()
+                    original_page.insert_pdf(
+                        doc,
+                        from_page=page_index,
+                        to_page=page_index,
+                    )
+                    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+                    inserted_on_page = 0
+                    try:
+                        for block_number, block, translated in insertable_blocks:
+                            inserted, used_size = _insert_translated_text(
+                                page, block, translated
+                            )
 
-                for block_number, (block, translated) in enumerate(translated_blocks, start=1):
-                    inserted, used_size = _insert_translated_text(page, block, translated)
-                    processed_blocks += 1
+                            if not inserted:
+                                # Redaction is destructive.  Restore the whole
+                                # original page so a rare renderer mismatch can
+                                # never leave a blank area in the final PDF.
+                                doc.delete_page(page_index)
+                                doc.insert_pdf(original_page, start_at=page_index)
+                                warnings.append(
+                                    f"PDF, страница {page_index + 1}, "
+                                    f"блок {block_number}: неожиданная ошибка "
+                                    "вставки после проверки макета; исходная "
+                                    "страница восстановлена, обработка документа "
+                                    "продолжена"
+                                )
+                                inserted_on_page = 0
+                                break
 
-                    if not inserted:
-                        warning = (
-                            f"PDF, страница {page_index + 1}, блок {block_number}: "
-                            "перевод не поместился даже при минимальном размере шрифта"
-                        )
-                        warnings.append(warning)
-                        report = _write_qa_report(
-                            destination,
-                            warnings,
-                            source=source,
-                            processed_units=processed_blocks,
-                        )
-                        raise TranslationQualityError(
-                            f"Перевод остановлен на странице {page_index + 1}, "
-                            f"блок {block_number}: русский текст не поместился в исходную область. "
-                            "Страница не отмечена как завершённая. "
-                            f"QA-отчёт: {report}",
-                            report,
-                        )
-                    elif used_size < max(5.0, block.font_size * 0.55):
-                        warnings.append(
-                            f"PDF, страница {page_index + 1}, блок {block_number}: "
-                            f"шрифт сильно уменьшен до {used_size:.1f} pt"
-                        )
+                            inserted_on_page += 1
+                            if used_size < max(5.0, block.font_size * 0.55):
+                                warnings.append(
+                                    f"PDF, страница {page_index + 1}, "
+                                    f"блок {block_number}: шрифт сильно уменьшен "
+                                    f"до {used_size:.1f} pt"
+                                )
+                    finally:
+                        original_page.close()
+
+                    processed_blocks += inserted_on_page
 
             _safe_progress(
                 progress,
