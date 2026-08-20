@@ -146,7 +146,10 @@ class TranslationOutputSafetyTests(unittest.TestCase):
             {"choices": [{"message": {"content": "Неизвестный третий заголовок"}}]},
             {"choices": [{"message": {"content": "Неизвестный четвёртый заголовок"}}]},
         ]
-        with patch("translator._post_json", side_effect=responses) as mocked_post:
+        with (
+            patch("translator._translate_with_opus", side_effect=RuntimeError("force model path")),
+            patch("translator._post_json", side_effect=responses) as mocked_post,
+        ):
             result = translate_text(source, AppConfig())
         prompts = [
             call.args[1]["messages"][-1]["content"]
@@ -239,7 +242,10 @@ class TranslationOutputSafetyTests(unittest.TestCase):
             {"choices": [{"message": {"content": first}}]},
             {"choices": [{"message": {"content": second}}]},
         ]
-        with patch("translator._post_json", side_effect=responses) as mocked_post:
+        with (
+            patch("translator._translate_with_opus", side_effect=RuntimeError("force model path")),
+            patch("translator._post_json", side_effect=responses) as mocked_post,
+        ):
             result = translate_text(source, AppConfig())
         self.assertIn("Температура масла", result)
         self.assertIn("оператор должен остановить машину", result)
@@ -259,7 +265,10 @@ class TranslationOutputSafetyTests(unittest.TestCase):
                 raise RuntimeError("block rejected")
             return translations[text]
 
-        with patch("translator._translate_chunk", side_effect=fake_chunk):
+        with (
+            patch("translator._translate_with_opus", side_effect=RuntimeError("force model path")),
+            patch("translator._translate_chunk", side_effect=fake_chunk),
+        ):
             result = translate_text(source, AppConfig())
         self.assertEqual(
             result,
