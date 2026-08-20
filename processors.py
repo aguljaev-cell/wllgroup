@@ -18,7 +18,7 @@ from translator import qa_text, should_translate, translate_text
 
 Progress = Callable[[float, str], None]
 
-_CHECKPOINT_SCHEMA = 2
+_CHECKPOINT_SCHEMA = 3
 
 
 @dataclass(slots=True)
@@ -29,6 +29,7 @@ class PdfTextBlock:
     color: tuple[float, float, float]
     alignment: int
     rotation: int = 0
+    expandable: bool = False
 
 
 class TranslationQualityError(RuntimeError):
@@ -283,6 +284,65 @@ def _extract_pdf_blocks(page: fitz.Page) -> list[PdfTextBlock]:
     return result
 
 
+def _extract_pdf_repair_blocks(page: fitz.Page) -> list[PdfTextBlock]:
+    """Extract only residual source-language lines from a translated PDF.
+
+    A normal PDF block can be a whole table or half a drawing.  Repairing it
+    as one unit is both slow and likely to fail the fit preflight.  Line-sized
+    regions let us repair TOC rows, table cells and schematic labels without
+    touching neighbouring Russian text or protected equipment codes.
+    """
+    data = page.get_text(
+        "dict",
+        flags=fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE,
+    )
+    result: list[PdfTextBlock] = []
+
+    for raw_block in data.get("blocks", []):
+        if raw_block.get("type") != 0:
+            continue
+        for line in raw_block.get("lines", []):
+            spans = line.get("spans", [])
+            if not spans or "bbox" not in line:
+                continue
+            text = "".join(span.get("text", "") for span in spans).strip()
+            if not should_translate(text):
+                continue
+
+            rect = fitz.Rect(line["bbox"])
+            if rect.width < 4 or rect.height < 3:
+                continue
+            sizes = [
+                float(span.get("size", 10.0))
+                for span in spans
+                if float(span.get("size", 0.0)) > 0
+            ]
+            colors = [
+                span.get("color")
+                for span in spans
+                if isinstance(span.get("color"), int)
+            ]
+            direction = line.get("dir", (1.0, 0.0))
+            rotation = 0
+            if isinstance(direction, (list, tuple)) and len(direction) == 2:
+                x, y = float(direction[0]), float(direction[1])
+                if abs(y) > abs(x):
+                    rotation = 90 if y > 0 else 270
+
+            result.append(
+                PdfTextBlock(
+                    rect=rect,
+                    text=text,
+                    font_size=sum(sizes) / max(1, len(sizes)),
+                    color=_rgb_from_int(colors[0] if colors else None),
+                    alignment=fitz.TEXT_ALIGN_LEFT,
+                    rotation=rotation,
+                    expandable=True,
+                )
+            )
+    return result
+
+
 def _expanded_rect(rect: fitz.Rect, page_rect: fitz.Rect, margin: float = 0.6) -> fitz.Rect:
     expanded = fitz.Rect(
         max(page_rect.x0, rect.x0 - margin),
@@ -302,7 +362,7 @@ def _insert_translated_text(
     fontname = "wllfont" if fontfile else "helv"
 
     start_size = min(max(block.font_size, 6.0), 22.0)
-    minimum_size = 3.5
+    minimum_size = 2.6 if block.expandable else 3.5
     size = start_size
 
     rect = _expanded_rect(block.rect, page.rect, margin=0.5)
@@ -326,6 +386,17 @@ def _insert_translated_text(
 
     # Последняя попытка в слегка увеличенной области, не выходящей за страницу.
     fallback_rect = _expanded_rect(block.rect, page.rect, margin=2.5)
+    if block.expandable and block.rotation == 0:
+        # Drawing labels and TOC rows usually have free horizontal space, but
+        # their extracted bbox ends exactly at the last source glyph.
+        fallback_rect.x1 = min(
+            page.rect.x1 - 1.0,
+            max(fallback_rect.x1, block.rect.x0 + 120.0, block.rect.x1 + block.rect.width),
+        )
+        fallback_rect.y1 = min(
+            page.rect.y1 - 1.0,
+            max(fallback_rect.y1, block.rect.y1 + block.rect.height * 0.8),
+        )
     result = page.insert_textbox(
         fallback_rect,
         text,
@@ -415,6 +486,7 @@ def _load_checkpoint(
     *,
     start_index: int,
     end_index: int,
+    repair_mode: bool = False,
 ) -> tuple[fitz.Document, int, list[str], int, bool]:
     if not partial.exists() or not state_path.exists():
         return fitz.open(str(source)), start_index, [], 0, False
@@ -427,6 +499,7 @@ def _load_checkpoint(
             and state.get("source") == _source_signature(source)
             and int(state.get("start_index", -1)) == start_index
             and int(state.get("end_index", -1)) == end_index
+            and bool(state.get("repair_mode", False)) == repair_mode
             and start_index <= next_index <= end_index + 1
         )
         if not valid:
@@ -453,6 +526,7 @@ def _save_checkpoint(
     next_page_index: int,
     warnings: list[str],
     processed_blocks: int,
+    repair_mode: bool = False,
 ) -> fitz.Document:
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial_tmp = partial.with_name(partial.stem + "-tmp.pdf")
@@ -482,6 +556,7 @@ def _save_checkpoint(
             "next_page_index": next_page_index,
             "warnings": warnings,
             "processed_blocks": processed_blocks,
+            "repair_mode": repair_mode,
         }
         state_tmp.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -525,6 +600,7 @@ def translate_pdf(
     *,
     page_start: int | None = None,
     page_end: int | None = None,
+    repair_mode: bool = False,
 ) -> Path:
     source = Path(source)
     destination = Path(destination)
@@ -547,10 +623,12 @@ def translate_pdf(
         state_path,
         start_index=start_index,
         end_index=end_index,
+        repair_mode=repair_mode,
     )
     range_pages = end_index - start_index + 1
     session_pages = max(1, end_index - resume_index + 1)
     started = time.monotonic()
+    translation_cache: dict[str, str] = {}
 
     if resumed:
         _safe_progress(
@@ -562,11 +640,41 @@ def translate_pdf(
     try:
         for page_index in range(resume_index, end_index + 1):
             page = doc[page_index]
-            blocks = _extract_pdf_blocks(page)
+            blocks = (
+                _extract_pdf_repair_blocks(page)
+                if repair_mode
+                else _extract_pdf_blocks(page)
+            )
             page_offset = page_index - start_index
             session_offset = page_index - resume_index
 
             if not blocks:
+                if repair_mode:
+                    _safe_progress(
+                        progress,
+                        ((page_offset + 1) / range_pages) * 100.0,
+                        _progress_message(
+                            f"PDF: страница {page_index + 1}/{doc.page_count} уже переведена",
+                            started=started,
+                            session_fraction=(session_offset + 1) / session_pages,
+                        ),
+                    )
+                    doc = _continue_from_checkpoint(
+                        doc,
+                        _save_checkpoint(
+                            doc,
+                            source,
+                            partial,
+                            state_path,
+                            start_index=start_index,
+                            end_index=end_index,
+                            next_page_index=page_index + 1,
+                            warnings=warnings,
+                            processed_blocks=processed_blocks,
+                            repair_mode=repair_mode,
+                        ),
+                    )
+                    continue
                 image_note = " На странице есть изображения." if _page_has_images(page) else ""
                 warnings.append(
                     f"PDF, страница {page_index + 1}: текстовый слой не найден; "
@@ -593,6 +701,7 @@ def translate_pdf(
                         next_page_index=page_index + 1,
                         warnings=warnings,
                         processed_blocks=processed_blocks,
+                        repair_mode=repair_mode,
                     ),
                 )
                 continue
@@ -602,7 +711,11 @@ def translate_pdf(
             translated_blocks: list[tuple[int, PdfTextBlock, str]] = []
             for block_number, block in enumerate(blocks, start=1):
                 try:
-                    translated = translate_text(block.text, config)
+                    if block.text in translation_cache:
+                        translated = translation_cache[block.text]
+                    else:
+                        translated = translate_text(block.text, config)
+                        translation_cache[block.text] = translated
                     translated_blocks.append((block_number, block, translated))
                     warnings.extend(
                         qa_text(
@@ -715,6 +828,7 @@ def translate_pdf(
                     next_page_index=page_index + 1,
                     warnings=warnings,
                     processed_blocks=processed_blocks,
+                    repair_mode=repair_mode,
                 ),
             )
 

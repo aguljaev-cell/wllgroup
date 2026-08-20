@@ -113,6 +113,7 @@ class TranslationWorker(QObject):
         *,
         page_start: int | None = None,
         page_end: int | None = None,
+        repair_mode: bool = False,
     ):
         super().__init__()
         self.source = Path(source)
@@ -120,6 +121,7 @@ class TranslationWorker(QObject):
         self.config = config
         self.page_start = page_start
         self.page_end = page_end
+        self.repair_mode = repair_mode
         self.server = LocalModelServer(config)
         self._cancelled = Event()
         self._server_started = False
@@ -176,6 +178,7 @@ class TranslationWorker(QObject):
                     mapped,
                     page_start=self.page_start,
                     page_end=self.page_end,
+                    repair_mode=self.repair_mode,
                 )
             elif suffix == ".docx":
                 report = translate_docx(

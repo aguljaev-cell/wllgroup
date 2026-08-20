@@ -214,9 +214,19 @@ class MainWindow(QMainWindow):
         self.test_mode = QCheckBox("Тестовый режим — только 3 страницы")
         self.test_mode.setChecked(True)
 
+        self.repair_mode = QCheckBox(
+            "Доделать пропущенный перевод в готовом PDF"
+        )
+        self.repair_mode.setToolTip(
+            "Переводит только оставшиеся английские и китайские строки, "
+            "не затрагивая уже русский текст"
+        )
+        self.repair_mode.toggled.connect(self._on_repair_mode_changed)
+
         range_row.addWidget(self.page_start_spin)
         range_row.addWidget(self.page_end_spin)
         range_row.addWidget(self.test_mode)
+        range_row.addWidget(self.repair_mode)
         range_row.addStretch(1)
         self.pdf_options.setVisible(False)
         card_layout.addWidget(self.pdf_options)
@@ -331,7 +341,8 @@ class MainWindow(QMainWindow):
         self.choose_btn.setEnabled(not busy)
         self.page_start_spin.setEnabled(not busy)
         self.page_end_spin.setEnabled(not busy)
-        self.test_mode.setEnabled(not busy)
+        self.test_mode.setEnabled(not busy and not self.repair_mode.isChecked())
+        self.repair_mode.setEnabled(not busy)
         self.start_btn.setEnabled(
             ready and not busy and self.source is not None
         )
@@ -386,6 +397,7 @@ class MainWindow(QMainWindow):
             self.page_start_spin.setValue(1)
             self.page_end_spin.setValue(maximum)
             self.test_mode.setChecked(maximum > 3)
+            self.repair_mode.setChecked(False)
 
         self.source = path
         self.pdf_options.setVisible(is_pdf)
@@ -394,6 +406,18 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Выбран файл: {path.name}{pages_note}")
         self._append_log(f"Выбран исходный файл: {path}")
         self._update_state()
+
+    def _on_repair_mode_changed(self, enabled: bool) -> None:
+        if enabled:
+            self.test_mode.setChecked(False)
+            self.status.setText(
+                "Режим ремонта: будут обработаны только оставшиеся "
+                "английские и китайские строки"
+            )
+            self.start_btn.setText("Доделать пропущенный перевод")
+        else:
+            self.start_btn.setText("Перевести и сохранить")
+        self.test_mode.setEnabled(not enabled and not self._is_busy())
 
     def choose_file(self) -> None:
         name, _ = QFileDialog.getOpenFileName(
@@ -460,8 +484,10 @@ class MainWindow(QMainWindow):
         page_start: int | None = None
         page_end: int | None = None
         range_suffix = ""
+        repair_mode = False
 
         if suffix == ".pdf":
+            repair_mode = self.repair_mode.isChecked()
             page_start = self.page_start_spin.value()
             page_end = self.page_end_spin.value()
             if page_start > page_end:
@@ -472,10 +498,10 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            if self.test_mode.isChecked():
+            if self.test_mode.isChecked() and not repair_mode:
                 page_end = min(page_end, page_start + 2)
                 range_suffix = f"_TEST_{page_start}-{page_end}"
-            elif page_end - page_start + 1 > 20:
+            elif page_end - page_start + 1 > 20 and not repair_mode:
                 answer = QMessageBox.question(
                     self,
                     "Большой диапазон",
@@ -486,9 +512,8 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.StandardButton.Yes:
                     return
 
-        suggested = self.source.with_name(
-            f"{self.source.stem}_RU{range_suffix}{suffix}"
-        )
+        result_suffix = "_REPAIRED" if repair_mode else f"_RU{range_suffix}"
+        suggested = self.source.with_name(f"{self.source.stem}{result_suffix}{suffix}")
 
         name, _ = QFileDialog.getSaveFileName(
             self,
@@ -521,6 +546,7 @@ class MainWindow(QMainWindow):
                 self.config,
                 page_start=page_start,
                 page_end=page_end,
+                repair_mode=repair_mode,
             ),
             "Перевод выполняется…",
             setup=False,

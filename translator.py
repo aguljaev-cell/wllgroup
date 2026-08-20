@@ -150,6 +150,21 @@ GLOSSARY: dict[str, str] = {
 # so exact known headings are translated deterministically. This also keeps
 # catalogue page numbers and dot leaders out of the model prompt.
 EXACT_TRANSLATIONS: dict[str, str] = {
+    "on": "Вкл.",
+    "off": "Выкл.",
+    "open": "Открыть",
+    "close": "Закрыть",
+    "start": "Пуск",
+    "stop": "Стоп",
+    "reset": "Сброс",
+    "input": "Вход",
+    "output": "Выход",
+    "manual": "Ручной режим",
+    "automatic": "Автоматический режим",
+    "setup": "Настройка",
+    "alarm": "Авария",
+    "error": "Ошибка",
+    "page": "Страница",
     "catalogue one(injection)": "СОДЕРЖАНИЕ. ЧАСТЬ 1 (ВПРЫСК)",
     "learn kronce injection molding machine system": "Изучение системы термопластавтомата Kronce",
     "theory in kronce precision machinery injection molding system": "Теория системы литья под давлением оборудования Kronce",
@@ -232,9 +247,7 @@ BAD_TRANSLATIONS: tuple[str, ...] = (
 
 
 _ALLOWED_LATIN_WORDS = {
-    "alarm", "auto", "bar", "close", "error", "home", "input", "manual",
-    "mode", "open", "output", "reset", "servo", "setup", "start", "stop",
-    "test", "usb", "wifi", "ethernet", "plc", "hmi", "pid", "cnc", "cad",
+    "bar", "usb", "wifi", "ethernet", "plc", "hmi", "pid", "cnc", "cad",
     "cam", "pdf", "docx", "rpm", "pet", "abs", "pvc", "pa", "pc", "pp",
     "kronce", "hangzhou", "shanghai", "andy", "enterprise", "development",
     "precision", "machinery",
@@ -359,6 +372,26 @@ def should_translate(text: str) -> bool:
 
     letters = sum(ch.isalpha() for ch in stripped)
     if letters == 0:
+        return False
+
+    # This predicate is also used by the repair pass over an already
+    # translated PDF.  Pure Russian text must therefore be ignored.  CJK is
+    # always source language; for Latin text require at least one natural
+    # word instead of treating equipment codes and units as prose.
+    if _CJK_RE.search(stripped):
+        return True
+
+    latin_words = re.findall(r"\b[A-Za-z][A-Za-z-]{2,}\b", stripped)
+    if not latin_words:
+        return False
+
+    natural_latin = [
+        word
+        for word in latin_words
+        if len(word) >= 3
+        and not re.fullmatch(r"[A-Z]{1,5}\d[A-Z0-9._/-]*", word)
+    ]
+    if not natural_latin:
         return False
 
     compact = re.sub(r"[\W_]+", "", stripped, flags=re.UNICODE)
@@ -964,6 +997,17 @@ def translate_text(text: str, config: AppConfig) -> str:
     catalogue = _translate_catalogue(text, config)
     if catalogue is not None:
         return catalogue
+
+    # English-only fragments are handled by the compact packaged model first.
+    # TranslateGemma remains the quality fallback and handles Chinese / mixed
+    # source text.  This makes long manuals dramatically faster on CPU.
+    if not _CJK_RE.search(text):
+        try:
+            fast = _translate_with_opus(text)
+            if fast.strip():
+                return fast
+        except RuntimeError:
+            pass
 
     try:
         translated_chunks: list[str] = []

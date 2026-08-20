@@ -12,6 +12,7 @@ from config import APP_VERSION, AppConfig
 from processors import (
     TranslationQualityError,
     _checkpoint_paths,
+    _extract_pdf_repair_blocks,
     _save_checkpoint,
     translate_pdf,
 )
@@ -31,7 +32,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.6.1")
+        self.assertEqual(APP_VERSION, "0.6.2")
         self.assertIn("translategemma-4b-it", config.model_filename)
         self.assertEqual(config.model_size, 2_489_909_760)
         self.assertLessEqual(config.request_timeout, 300)
@@ -91,6 +92,21 @@ class TranslationOutputSafetyTests(unittest.TestCase):
         self.assertTrue(should_translate("DECLARATION"))
         self.assertFalse(should_translate("KS-PET"))
         self.assertFalse(should_translate("PLC"))
+        self.assertFalse(should_translate("Температура масла слишком высокая"))
+        self.assertTrue(should_translate("Mold height limit bwd"))
+        self.assertTrue(should_translate("模具高度检测"))
+
+    def test_repair_extractor_ignores_russian_and_equipment_codes(self) -> None:
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Переведённый русский текст")
+        page.insert_text((72, 100), "Mold height limit bwd")
+        page.insert_text((72, 128), "DI8 XD4 PLC")
+        try:
+            blocks = _extract_pdf_repair_blocks(page)
+        finally:
+            doc.close()
+        self.assertEqual([block.text for block in blocks], ["Mold height limit bwd"])
 
     def test_known_catalogue_heading_does_not_call_model(self) -> None:
         with patch("translator._post_json") as mocked_post:
@@ -505,6 +521,41 @@ class PdfCheckpointTests(unittest.TestCase):
             self.assertEqual(translated_pages, list(range(1, 11)))
             self.assertTrue(destination.exists())
             self.assertIn("страница 7", report.read_text(encoding="utf-8"))
+
+    def test_repair_mode_translates_only_residual_source_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "translated.pdf"
+            destination = root / "repaired.pdf"
+            doc = fitz.open()
+            page = doc.new_page()
+            page.insert_text((72, 72), "Русский текст уже готов")
+            page.insert_text((72, 100), "Mold height limit bwd")
+            page.insert_text((72, 128), "DI8 XD4 PLC")
+            doc.save(str(source))
+            doc.close()
+
+            inputs: list[str] = []
+
+            def fake_translate(text: str, config: AppConfig) -> str:
+                inputs.append(text)
+                return "Ограничение высоты пресс-формы назад"
+
+            with (
+                patch("processors.translate_text", side_effect=fake_translate),
+                patch("processors._translation_fits", return_value=True),
+                patch("processors._insert_translated_text", return_value=(True, 7.0)),
+            ):
+                translate_pdf(
+                    source,
+                    destination,
+                    AppConfig(),
+                    lambda value, message: None,
+                    repair_mode=True,
+                )
+
+            self.assertEqual(inputs, ["Mold height limit bwd"])
+            self.assertTrue(destination.exists())
 
 
 class WorkerReportSignalTests(unittest.TestCase):

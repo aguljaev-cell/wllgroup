@@ -229,7 +229,7 @@ jobs:
 
           @'
           #define MyAppName "PDFMathTranslate WLL"
-          #define MyAppVersion "0.6.1"
+          #define MyAppVersion "0.6.2"
           #define MyAppPublisher "WorldLogicLine"
           #define MyAppExeName "PDFMathTranslate_WLL.exe"
 
@@ -241,7 +241,7 @@ jobs:
           DefaultDirName={localappdata}\Programs\PDFMathTranslate WLL
           DefaultGroupName={#MyAppName}
           OutputDir=..\release
-          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_1
+          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_2
           Compression=lzma2/ultra64
           SolidCompression=yes
           WizardStyle=modern
@@ -276,7 +276,7 @@ jobs:
         shell: pwsh
         run: |
           $file = Get-Item `
-            release/PDFMathTranslate_WLL_Setup_v0_6_1.exe
+            release/PDFMathTranslate_WLL_Setup_v0_6_2.exe
 
           $hash = (
             Get-FileHash `
@@ -292,9 +292,9 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: PDFMathTranslate_WLL_Windows_v0_6_1
+          name: PDFMathTranslate_WLL_Windows_v0_6_2
           path: |
-            release/PDFMathTranslate_WLL_Setup_v0_6_1.exe
+            release/PDFMathTranslate_WLL_Setup_v0_6_2.exe
             release/SHA256SUMS.txt
           retention-days: 14
 
@@ -303,10 +303,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = 'v0.6.1'
+          $tag = 'v0.6.2'
           $repository = $env:GITHUB_REPOSITORY
           $assets = @(
-            'release/PDFMathTranslate_WLL_Setup_v0_6_1.exe',
+            'release/PDFMathTranslate_WLL_Setup_v0_6_2.exe',
             'release/SHA256SUMS.txt'
           )
 
@@ -320,6 +320,6 @@ jobs:
             gh release create $tag $assets `
               --repo $repository `
               --target $env:GITHUB_SHA `
-              --title 'PDFMathTranslate WLL 0.6.1' `
-              --notes 'Исправлена остановка большого PDF на одном проблемном блоке. Добавлено продолжение обработки, сохранение исходной страницы при проблеме размещения и контрольные точки после каждой страницы.'
+              --title 'PDFMathTranslate WLL 0.6.2' `
+              --notes 'Добавлен режим ремонта готового PDF: переводятся только оставшиеся английские и китайские строки. Оглавления, таблицы и подписи на схемах обрабатываются построчно; русский текст и коды оборудования не затрагиваются. Английский перевод ускорен встроенной моделью OPUS-MT, повторяющиеся подписи кэшируются.'
           }
