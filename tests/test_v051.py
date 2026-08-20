@@ -13,6 +13,8 @@ from processors import (
     TranslationQualityError,
     _checkpoint_paths,
     _extract_pdf_repair_blocks,
+    _extract_schematic_repair_blocks,
+    _translate_pdf_text,
     _save_checkpoint,
     translate_pdf,
 )
@@ -32,7 +34,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.6.2")
+        self.assertEqual(APP_VERSION, "0.6.3")
         self.assertIn("translategemma-4b-it", config.model_filename)
         self.assertEqual(config.model_size, 2_489_909_760)
         self.assertLessEqual(config.request_timeout, 300)
@@ -107,6 +109,99 @@ class TranslationOutputSafetyTests(unittest.TestCase):
         finally:
             doc.close()
         self.assertEqual([block.text for block in blocks], ["Mold height limit bwd"])
+
+    def test_repair_extractor_keeps_paragraph_lines_together(self) -> None:
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_textbox(
+            fitz.Rect(72, 72, 400, 140),
+            "The operator must stop the machine.\nThen inspect the hydraulic circuit.",
+            fontsize=10,
+        )
+        try:
+            blocks = _extract_pdf_repair_blocks(page)
+        finally:
+            doc.close()
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("\n", blocks[0].text)
+        self.assertEqual(blocks[0].kind, "paragraph")
+
+    def test_schematic_bilingual_pair_becomes_one_russian_target(self) -> None:
+        data = {
+            "blocks": [{
+                "type": 0,
+                "lines": [
+                    {
+                        "bbox": (10, 10, 70, 20),
+                        "dir": (1, 0),
+                        "spans": [{"text": "调模退极限", "size": 8, "color": 0}],
+                    },
+                    {
+                        "bbox": (10, 20, 100, 30),
+                        "dir": (1, 0),
+                        "spans": [{"text": "Mold height limit bwd", "size": 8, "color": 0}],
+                    },
+                ],
+            }],
+        }
+        blocks = _extract_schematic_repair_blocks(data)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].text, "Mold height limit bwd")
+        self.assertEqual(tuple(blocks[0].rect), (10.0, 10.0, 100.0, 30.0))
+        self.assertTrue(blocks[0].prefer_fast)
+
+    def test_schematic_mixed_line_uses_only_english_duplicate(self) -> None:
+        data = {
+            "blocks": [{
+                "type": 0,
+                "lines": [{
+                    "bbox": (10, 10, 180, 20),
+                    "dir": (1, 0),
+                    "spans": [{
+                        "text": "机械手联锁 Safety Inter Locking",
+                        "size": 8,
+                        "color": 0,
+                    }],
+                }],
+            }],
+        }
+        blocks = _extract_schematic_repair_blocks(data)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].text, "Safety Inter Locking")
+        self.assertTrue(blocks[0].prefer_fast)
+
+    def test_normal_text_uses_quality_model_before_opus(self) -> None:
+        with (
+            patch("processors._translate_resilient", return_value="Проверить систему") as quality,
+            patch("processors._translate_with_opus") as fast,
+        ):
+            result = _translate_pdf_text("Check the hydraulic system", AppConfig())
+        self.assertEqual(result, "Проверить систему")
+        quality.assert_called_once()
+        fast.assert_not_called()
+
+    def test_schematic_label_can_use_fast_translator(self) -> None:
+        with (
+            patch("processors._translate_with_opus", return_value="Ограничение высоты") as fast,
+            patch("processors._translate_resilient") as quality,
+        ):
+            result = _translate_pdf_text(
+                "Mold height limit bwd",
+                AppConfig(),
+                prefer_fast=True,
+            )
+        self.assertEqual(result, "Ограничение высоты")
+        fast.assert_called_once()
+        quality.assert_not_called()
+
+    def test_chinese_failure_never_falls_back_to_english_opus(self) -> None:
+        with (
+            patch("processors._translate_resilient", side_effect=RuntimeError("rejected")),
+            patch("processors._translate_with_opus") as fast,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rejected"):
+                _translate_pdf_text("调模退极限", AppConfig())
+        fast.assert_not_called()
 
     def test_known_catalogue_heading_does_not_call_model(self) -> None:
         with patch("translator._post_json") as mocked_post:
@@ -315,11 +410,11 @@ class PdfCheckpointTests(unittest.TestCase):
 
             translated_inputs: list[str] = []
 
-            def fake_translate(text: str, config: AppConfig) -> str:
+            def fake_translate(text: str, config: AppConfig, **kwargs: object) -> str:
                 translated_inputs.append(text)
                 return "Translated"
 
-            with patch("processors.translate_text", side_effect=fake_translate):
+            with patch("processors._translate_pdf_text", side_effect=fake_translate):
                 report = translate_pdf(
                     source,
                     destination,
@@ -373,11 +468,11 @@ class PdfCheckpointTests(unittest.TestCase):
 
             translated_inputs: list[str] = []
 
-            def fake_translate(text: str, config: AppConfig) -> str:
+            def fake_translate(text: str, config: AppConfig, **kwargs: object) -> str:
                 translated_inputs.append(text)
                 return "Translated"
 
-            with patch("processors.translate_text", side_effect=fake_translate):
+            with patch("processors._translate_pdf_text", side_effect=fake_translate):
                 translate_pdf(
                     source,
                     destination,
@@ -400,7 +495,11 @@ class PdfCheckpointTests(unittest.TestCase):
 
             calls = 0
 
-            def translate_or_fail(text: str, config: AppConfig) -> str:
+            def translate_or_fail(
+                text: str,
+                config: AppConfig,
+                **kwargs: object,
+            ) -> str:
                 nonlocal calls
                 calls += 1
                 if calls == 1:
@@ -408,7 +507,7 @@ class PdfCheckpointTests(unittest.TestCase):
                 return "Переведено"
 
             with (
-                patch("processors.translate_text", side_effect=translate_or_fail),
+                patch("processors._translate_pdf_text", side_effect=translate_or_fail),
                 patch("processors._translation_fits", return_value=True),
                 patch("processors._insert_translated_text", return_value=(True, 8.0)),
             ):
@@ -439,7 +538,7 @@ class PdfCheckpointTests(unittest.TestCase):
             self._make_pdf(source)
 
             with (
-                patch("processors.translate_text", return_value="Переведённый текст"),
+                patch("processors._translate_pdf_text", return_value="Переведённый текст"),
                 patch("processors._translation_fits", return_value=False),
             ):
                 report = translate_pdf(
@@ -467,7 +566,7 @@ class PdfCheckpointTests(unittest.TestCase):
             self._make_pdf(source)
 
             with (
-                patch("processors.translate_text", return_value="Переведённый текст"),
+                patch("processors._translate_pdf_text", return_value="Переведённый текст"),
                 patch("processors._translation_fits", return_value=True),
                 patch("processors._insert_translated_text", return_value=(False, 3.5)),
             ):
@@ -503,7 +602,11 @@ class PdfCheckpointTests(unittest.TestCase):
 
             translated_pages: list[int] = []
 
-            def translate_with_page_seven_failure(text: str, config: AppConfig) -> str:
+            def translate_with_page_seven_failure(
+                text: str,
+                config: AppConfig,
+                **kwargs: object,
+            ) -> str:
                 page_number = int(text.rsplit(" ", 1)[-1])
                 translated_pages.append(page_number)
                 if page_number == 7:
@@ -512,7 +615,7 @@ class PdfCheckpointTests(unittest.TestCase):
 
             with (
                 patch(
-                    "processors.translate_text",
+                    "processors._translate_pdf_text",
                     side_effect=translate_with_page_seven_failure,
                 ),
                 patch("processors._translation_fits", return_value=True),
@@ -546,12 +649,12 @@ class PdfCheckpointTests(unittest.TestCase):
 
             inputs: list[str] = []
 
-            def fake_translate(text: str, config: AppConfig) -> str:
+            def fake_translate(text: str, config: AppConfig, **kwargs: object) -> str:
                 inputs.append(text)
                 return "Ограничение высоты пресс-формы назад"
 
             with (
-                patch("processors.translate_text", side_effect=fake_translate),
+                patch("processors._translate_pdf_text", side_effect=fake_translate),
                 patch("processors._translation_fits", return_value=True),
                 patch("processors._insert_translated_text", return_value=(True, 7.0)),
             ):

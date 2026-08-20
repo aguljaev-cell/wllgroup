@@ -13,12 +13,23 @@ from docx import Document
 from docx.text.paragraph import Paragraph
 
 from config import AppConfig
-from translator import qa_text, should_translate, translate_text
+from translator import (
+    _exact_translation,
+    _reflow_to_source_lines,
+    _translate_catalogue,
+    _translate_resilient,
+    _translate_with_opus,
+    _validate_model_translation,
+    qa_text,
+    should_translate,
+    split_long_text,
+    translate_text,
+)
 
 
 Progress = Callable[[float, str], None]
 
-_CHECKPOINT_SCHEMA = 3
+_CHECKPOINT_SCHEMA = 4
 
 
 @dataclass(slots=True)
@@ -30,6 +41,8 @@ class PdfTextBlock:
     alignment: int
     rotation: int = 0
     expandable: bool = False
+    prefer_fast: bool = False
+    kind: str = "body"
 
 
 class TranslationQualityError(RuntimeError):
@@ -38,6 +51,55 @@ class TranslationQualityError(RuntimeError):
     def __init__(self, message: str, report: Path):
         super().__init__(message)
         self.report = Path(report)
+
+
+_CJK_SOURCE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_DRAWING_LABELS = {
+    "page": "Стр.",
+    "page no": "Стр.",
+    "page no.": "Стр.",
+}
+
+
+def _translate_pdf_text(
+    text: str,
+    config: AppConfig,
+    *,
+    prefer_fast: bool = False,
+) -> str:
+    """Quality-first PDF policy with a fast path only for drawing labels."""
+    if not should_translate(text):
+        return text
+
+    drawing_exact = _DRAWING_LABELS.get(text.strip().casefold())
+    if drawing_exact is not None:
+        return drawing_exact
+
+    exact = _exact_translation(text)
+    if exact is not None:
+        return exact
+    catalogue = _translate_catalogue(text, config)
+    if catalogue is not None:
+        return catalogue
+
+    if prefer_fast and not _CJK_SOURCE_RE.search(text):
+        try:
+            translated = _translate_with_opus(text)
+            if translated.strip():
+                return translated
+        except RuntimeError:
+            pass
+
+    translated_chunks: list[str] = []
+    for chunk in split_long_text(text):
+        translated_chunks.append(
+            _translate_resilient(chunk, config)
+            if should_translate(chunk)
+            else chunk
+        )
+    translated = _reflow_to_source_lines(text, "".join(translated_chunks))
+    _validate_model_translation(text, translated)
+    return translated
 
 
 def _safe_progress(progress: Progress, value: float, message: str) -> None:
@@ -284,62 +346,220 @@ def _extract_pdf_blocks(page: fitz.Page) -> list[PdfTextBlock]:
     return result
 
 
-def _extract_pdf_repair_blocks(page: fitz.Page) -> list[PdfTextBlock]:
-    """Extract only residual source-language lines from a translated PDF.
+def _line_to_pdf_block(
+    line: dict,
+    *,
+    rect: fitz.Rect | None = None,
+    text: str | None = None,
+    expandable: bool = False,
+    prefer_fast: bool = False,
+    kind: str = "body",
+) -> PdfTextBlock | None:
+    spans = line.get("spans", [])
+    if not spans or "bbox" not in line:
+        return None
+    line_text = text if text is not None else "".join(
+        span.get("text", "") for span in spans
+    ).strip()
+    if not should_translate(line_text):
+        return None
+    line_rect = fitz.Rect(rect or line["bbox"])
+    if line_rect.width < 4 or line_rect.height < 3:
+        return None
+    sizes = [
+        float(span.get("size", 10.0))
+        for span in spans
+        if float(span.get("size", 0.0)) > 0
+    ]
+    colors = [
+        span.get("color")
+        for span in spans
+        if isinstance(span.get("color"), int)
+    ]
+    direction = line.get("dir", (1.0, 0.0))
+    rotation = 0
+    if isinstance(direction, (list, tuple)) and len(direction) == 2:
+        x, y = float(direction[0]), float(direction[1])
+        if abs(y) > abs(x):
+            rotation = 90 if y > 0 else 270
+    return PdfTextBlock(
+        rect=line_rect,
+        text=line_text,
+        font_size=sum(sizes) / max(1, len(sizes)),
+        color=_rgb_from_int(colors[0] if colors else None),
+        alignment=fitz.TEXT_ALIGN_LEFT,
+        rotation=rotation,
+        expandable=expandable,
+        prefer_fast=prefer_fast,
+        kind=kind,
+    )
 
-    A normal PDF block can be a whole table or half a drawing.  Repairing it
-    as one unit is both slow and likely to fail the fit preflight.  Line-sized
-    regions let us repair TOC rows, table cells and schematic labels without
-    touching neighbouring Russian text or protected equipment codes.
-    """
+
+def _extract_schematic_repair_blocks(data: dict) -> list[PdfTextBlock]:
+    """Collapse bilingual drawing labels to one English→Russian operation."""
+    result: list[PdfTextBlock] = []
+    for raw_block in data.get("blocks", []):
+        if raw_block.get("type") != 0:
+            continue
+        lines = [
+            line for line in raw_block.get("lines", [])
+            if line.get("spans") and "bbox" in line
+        ]
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            current = "".join(
+                span.get("text", "") for span in line.get("spans", [])
+            ).strip()
+            current_rect = fitz.Rect(line["bbox"])
+
+            if re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", current):
+                # Many CAD exports put both languages in one text object
+                # ("机械手联锁 Safety Inter Locking").  Translate the English
+                # duplicate and redact the complete bilingual object.  This
+                # is much faster and more reliable than asking the model to
+                # interpret hundreds of isolated Chinese labels.
+                latin_candidates = [
+                    match.group(0).strip()
+                    for match in re.finditer(
+                        r"[A-Za-z][A-Za-z0-9 .,/()_:+-]*",
+                        current,
+                    )
+                ]
+                latin_duplicate = next(
+                    (
+                        candidate
+                        for candidate in latin_candidates
+                        if should_translate(candidate)
+                    ),
+                    "",
+                )
+                if should_translate(latin_duplicate):
+                    block = _line_to_pdf_block(
+                        line,
+                        rect=current_rect,
+                        text=latin_duplicate,
+                        expandable=True,
+                        prefer_fast=True,
+                        kind="schematic",
+                    )
+                    if block is not None:
+                        result.append(block)
+                    index += 1
+                    continue
+
+                if index + 1 < len(lines):
+                    following = lines[index + 1]
+                    following_text = "".join(
+                        span.get("text", "")
+                        for span in following.get("spans", [])
+                    ).strip()
+                    following_rect = fitz.Rect(following["bbox"])
+                    same_label = (
+                        should_translate(following_text)
+                        and not re.search(
+                            r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]",
+                            following_text,
+                        )
+                        and abs(current_rect.x0 - following_rect.x0)
+                        <= max(20.0, current_rect.height * 1.5)
+                        and following_rect.y0 - current_rect.y1
+                        <= max(2.0, current_rect.height * 0.45)
+                    )
+                    if same_label:
+                        pair_rect = current_rect | following_rect
+                        block = _line_to_pdf_block(
+                            following,
+                            rect=pair_rect,
+                            text=following_text,
+                            expandable=True,
+                            prefer_fast=True,
+                            kind="schematic",
+                        )
+                        if block is not None:
+                            result.append(block)
+                        index += 2
+                        continue
+
+                block = _line_to_pdf_block(
+                    line,
+                    expandable=True,
+                    kind="schematic_cjk",
+                )
+            else:
+                block = _line_to_pdf_block(
+                    line,
+                    expandable=True,
+                    prefer_fast=True,
+                    kind="schematic",
+                )
+            if block is not None:
+                result.append(block)
+            index += 1
+    return result
+
+
+def _extract_pdf_repair_blocks(page: fitz.Page) -> list[PdfTextBlock]:
+    """Extract residual text as paragraphs/cells or bilingual drawing labels."""
     data = page.get_text(
         "dict",
         flags=fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE,
     )
+    all_lines = [
+        line
+        for raw_block in data.get("blocks", [])
+        if raw_block.get("type") == 0
+        for line in raw_block.get("lines", [])
+        if line.get("spans") and "bbox" in line
+    ]
+    cjk_lines = sum(
+        bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", "".join(
+            span.get("text", "") for span in line.get("spans", [])
+        )))
+        for line in all_lines
+    )
+    if cjk_lines >= 2 and len(all_lines) >= 20:
+        return _extract_schematic_repair_blocks(data)
+
     result: list[PdfTextBlock] = []
 
     for raw_block in data.get("blocks", []):
         if raw_block.get("type") != 0:
             continue
-        for line in raw_block.get("lines", []):
-            spans = line.get("spans", [])
-            if not spans or "bbox" not in line:
-                continue
-            text = "".join(span.get("text", "") for span in spans).strip()
-            if not should_translate(text):
-                continue
+        lines = raw_block.get("lines", [])
+        group: list[dict] = []
 
-            rect = fitz.Rect(line["bbox"])
-            if rect.width < 4 or rect.height < 3:
-                continue
-            sizes = [
-                float(span.get("size", 10.0))
-                for span in spans
-                if float(span.get("size", 0.0)) > 0
+        def flush_group() -> None:
+            if not group:
+                return
+            text_lines = [
+                "".join(span.get("text", "") for span in line.get("spans", [])).strip()
+                for line in group
             ]
-            colors = [
-                span.get("color")
-                for span in spans
-                if isinstance(span.get("color"), int)
-            ]
-            direction = line.get("dir", (1.0, 0.0))
-            rotation = 0
-            if isinstance(direction, (list, tuple)) and len(direction) == 2:
-                x, y = float(direction[0]), float(direction[1])
-                if abs(y) > abs(x):
-                    rotation = 90 if y > 0 else 270
-
-            result.append(
-                PdfTextBlock(
-                    rect=rect,
-                    text=text,
-                    font_size=sum(sizes) / max(1, len(sizes)),
-                    color=_rgb_from_int(colors[0] if colors else None),
-                    alignment=fitz.TEXT_ALIGN_LEFT,
-                    rotation=rotation,
-                    expandable=True,
-                )
+            text = "\n".join(text_lines).strip()
+            rects = [fitz.Rect(line["bbox"]) for line in group]
+            rect = fitz.Rect(rects[0])
+            for item in rects[1:]:
+                rect |= item
+            block = _line_to_pdf_block(
+                group[0],
+                rect=rect,
+                text=text,
+                expandable=False,
+                kind="paragraph" if len(group) > 1 else "cell",
             )
+            if block is not None:
+                result.append(block)
+            group.clear()
+
+        for line in lines:
+            spans = line.get("spans", [])
+            text = "".join(span.get("text", "") for span in spans).strip()
+            if spans and "bbox" in line and should_translate(text):
+                group.append(line)
+            else:
+                flush_group()
+        flush_group()
     return result
 
 
@@ -362,7 +582,7 @@ def _insert_translated_text(
     fontname = "wllfont" if fontfile else "helv"
 
     start_size = min(max(block.font_size, 6.0), 22.0)
-    minimum_size = 2.6 if block.expandable else 3.5
+    minimum_size = 3.2 if block.kind.startswith("schematic") else 3.5
     size = start_size
 
     rect = _expanded_rect(block.rect, page.rect, margin=0.5)
@@ -628,7 +848,7 @@ def translate_pdf(
     range_pages = end_index - start_index + 1
     session_pages = max(1, end_index - resume_index + 1)
     started = time.monotonic()
-    translation_cache: dict[str, str] = {}
+    translation_cache: dict[tuple[str, bool], str] = {}
 
     if resumed:
         _safe_progress(
@@ -711,11 +931,16 @@ def translate_pdf(
             translated_blocks: list[tuple[int, PdfTextBlock, str]] = []
             for block_number, block in enumerate(blocks, start=1):
                 try:
-                    if block.text in translation_cache:
-                        translated = translation_cache[block.text]
+                    cache_key = (block.text, block.prefer_fast)
+                    if cache_key in translation_cache:
+                        translated = translation_cache[cache_key]
                     else:
-                        translated = translate_text(block.text, config)
-                        translation_cache[block.text] = translated
+                        translated = _translate_pdf_text(
+                            block.text,
+                            config,
+                            prefer_fast=block.prefer_fast,
+                        )
+                        translation_cache[cache_key] = translated
                     translated_blocks.append((block_number, block, translated))
                     warnings.extend(
                         qa_text(

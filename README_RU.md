@@ -1,8 +1,16 @@
-# PDFMathTranslate WLL v0.6.2
+# PDFMathTranslate WLL v0.6.3
 
 Windows-приложение для технического перевода PDF и DOCX на русский язык.
 
-Установщик без ZIP: [PDFMathTranslate_WLL_Setup_v0_6_2.exe](https://github.com/aguljaev-cell/wllgroup/releases/download/v0.6.2/PDFMathTranslate_WLL_Setup_v0_6_2.exe)
+Установщик без ZIP: [PDFMathTranslate_WLL_Setup_v0_6_3.exe](https://github.com/aguljaev-cell/wllgroup/releases/download/v0.6.3/PDFMathTranslate_WLL_Setup_v0_6_3.exe)
+
+## Что изменилось в v0.6.3
+
+- Остаточные абзацы и таблицы переводятся целыми смысловыми блоками, а не по одной строке.
+- На электрических схемах китайская и английская подписи объединяются и заменяются одной русской.
+- Быстрый OPUS-перевод используется только для коротких подписей схем; основной текст снова переводится качественной моделью TranslateGemma.
+- Китайский текст больше не может быть ошибочно принят английским резервным переводчиком без перевода.
+- Короткая подпись номера страницы вставляется как «Стр.», без разрыва слова.
 
 ## Что изменилось в v0.6.2
 
