@@ -14,6 +14,7 @@ from processors import (
     _checkpoint_paths,
     _extract_pdf_repair_blocks,
     _extract_schematic_repair_blocks,
+    _should_repair_line,
     _translate_pdf_text,
     _save_checkpoint,
     translate_pdf,
@@ -34,7 +35,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.6.3")
+        self.assertEqual(APP_VERSION, "0.6.4")
         self.assertIn("translategemma-4b-it", config.model_filename)
         self.assertEqual(config.model_size, 2_489_909_760)
         self.assertLessEqual(config.request_timeout, 300)
@@ -109,6 +110,64 @@ class TranslationOutputSafetyTests(unittest.TestCase):
         finally:
             doc.close()
         self.assertEqual([block.text for block in blocks], ["Mold height limit bwd"])
+
+    def test_repair_ignores_russian_rows_with_sds_acronyms(self) -> None:
+        self.assertFalse(
+            _should_repair_line(
+                "Паспорт подготовлен в соответствии с UN GHS и требованиями SDS"
+            )
+        )
+        self.assertFalse(_should_repair_line("Номер CAS"))
+        self.assertFalse(_should_repair_line("mayon@pengchenchem.com"))
+        self.assertFalse(
+            _should_repair_line("PENGCHEN NEW MATERIAL TECHNOLOGY CO., LTD.")
+        )
+        self.assertTrue(_should_repair_line("Name of the company"))
+
+    def test_repair_splits_side_by_side_table_cells(self) -> None:
+        page = Mock()
+        page.get_text.return_value = {
+            "blocks": [{
+                "type": 0,
+                "lines": [
+                    {
+                        "bbox": (50, 100, 120, 112),
+                        "dir": (1, 0),
+                        "spans": [{"text": "Component", "size": 10, "color": 0}],
+                    },
+                    {
+                        "bbox": (200, 100, 380, 112),
+                        "dir": (1, 0),
+                        "spans": [{
+                            "text": "List of carcinogens by the IARC",
+                            "size": 10,
+                            "color": 0,
+                        }],
+                    },
+                ],
+            }],
+        }
+        blocks = _extract_pdf_repair_blocks(page)
+        self.assertEqual(
+            [block.text for block in blocks],
+            ["Component", "List of carcinogens by the IARC"],
+        )
+        self.assertTrue(all(block.kind == "cell" for block in blocks))
+
+    def test_common_sds_terms_are_translated_deterministically(self) -> None:
+        with patch("processors._translate_resilient") as model:
+            self.assertEqual(
+                _translate_pdf_text("Derived No Effect Level", AppConfig()),
+                "Производный безопасный уровень воздействия",
+            )
+            self.assertEqual(
+                _translate_pdf_text(
+                    "Based on available data, the classification criteria are not met",
+                    AppConfig(),
+                ),
+                "На основании имеющихся данных критерии классификации не выполняются",
+            )
+        model.assert_not_called()
 
     def test_repair_extractor_keeps_paragraph_lines_together(self) -> None:
         doc = fitz.open()

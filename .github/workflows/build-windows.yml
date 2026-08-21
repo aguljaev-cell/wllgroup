@@ -229,7 +229,7 @@ jobs:
 
           @'
           #define MyAppName "PDFMathTranslate WLL"
-          #define MyAppVersion "0.6.3"
+          #define MyAppVersion "0.6.4"
           #define MyAppPublisher "WorldLogicLine"
           #define MyAppExeName "PDFMathTranslate_WLL.exe"
 
@@ -241,7 +241,7 @@ jobs:
           DefaultDirName={localappdata}\Programs\PDFMathTranslate WLL
           DefaultGroupName={#MyAppName}
           OutputDir=..\release
-          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_3
+          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_4
           Compression=lzma2/ultra64
           SolidCompression=yes
           WizardStyle=modern
@@ -276,7 +276,7 @@ jobs:
         shell: pwsh
         run: |
           $file = Get-Item `
-            release/PDFMathTranslate_WLL_Setup_v0_6_3.exe
+            release/PDFMathTranslate_WLL_Setup_v0_6_4.exe
 
           $hash = (
             Get-FileHash `
@@ -292,9 +292,9 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: PDFMathTranslate_WLL_Windows_v0_6_3
+          name: PDFMathTranslate_WLL_Windows_v0_6_4
           path: |
-            release/PDFMathTranslate_WLL_Setup_v0_6_3.exe
+            release/PDFMathTranslate_WLL_Setup_v0_6_4.exe
             release/SHA256SUMS.txt
           retention-days: 14
 
@@ -303,10 +303,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = 'v0.6.3'
+          $tag = 'v0.6.4'
           $repository = $env:GITHUB_REPOSITORY
           $assets = @(
-            'release/PDFMathTranslate_WLL_Setup_v0_6_3.exe',
+            'release/PDFMathTranslate_WLL_Setup_v0_6_4.exe',
             'release/SHA256SUMS.txt'
           )
 
@@ -320,6 +320,6 @@ jobs:
             gh release create $tag $assets `
               --repo $repository `
               --target $env:GITHUB_SHA `
-              --title 'PDFMathTranslate WLL 0.6.3' `
-              --notes 'Исправлен режим ремонта PDF. Абзацы и таблицы переводятся смысловыми блоками. На схемах китайско-английские дубли заменяются одной русской подписью. Основной технический текст снова использует TranslateGemma; быстрый OPUS оставлен только для коротких подписей. Непереведённый китайский результат больше не принимается.'
+              --title 'PDFMathTranslate WLL 0.6.4' `
+              --notes 'Исправлена обработка таблиц в режиме ремонта: соседние ячейки одной строки переводятся раздельно и помещаются в свои области. Русские строки с аббревиатурами SDS, GHS, CAS и UN больше не переводятся повторно. Добавлены термины паспортов безопасности и безопасная обработка URL, электронной почты и названий компаний.'
           }

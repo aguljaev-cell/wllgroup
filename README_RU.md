@@ -1,8 +1,16 @@
-# PDFMathTranslate WLL v0.6.3
+# PDFMathTranslate WLL v0.6.4
 
 Windows-приложение для технического перевода PDF и DOCX на русский язык.
 
-Установщик без ZIP: [PDFMathTranslate_WLL_Setup_v0_6_3.exe](https://github.com/aguljaev-cell/wllgroup/releases/download/v0.6.3/PDFMathTranslate_WLL_Setup_v0_6_3.exe)
+Установщик без ZIP: [PDFMathTranslate_WLL_Setup_v0_6_4.exe](https://github.com/aguljaev-cell/wllgroup/releases/download/v0.6.4/PDFMathTranslate_WLL_Setup_v0_6_4.exe)
+
+## Что изменилось в v0.6.4
+
+- Соседние ячейки одной строки таблицы больше не объединяются в один блок.
+- Русские строки с аббревиатурами SDS, GHS, CAS, UN и другими кодами не переводятся повторно.
+- Адреса электронной почты, URL и официальные названия компаний сохраняются без изменений.
+- Добавлены устойчивые русские термины для паспортов безопасности: STOT, PBT/vPvB, DNEL и перечни химических веществ.
+- Узкие одиночные ячейки получают безопасное дополнительное место без захода в соседнюю колонку.
 
 ## Что изменилось в v0.6.3
 

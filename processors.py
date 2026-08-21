@@ -60,6 +60,113 @@ _DRAWING_LABELS = {
     "page no.": "Стр.",
 }
 
+_SDS_EXACT_TRANSLATIONS = {
+    "name of the company": "Наименование компании",
+    "e-mail address": "Адрес электронной почты",
+    "component": "Компонент",
+    "list of carcinogens by the iarc": "Перечень канцерогенов по классификации IARC",
+    "stot-single exposure": "STOT — однократное воздействие",
+    "may cause drowsiness or dizziness(category 3)": "Может вызывать сонливость или головокружение (категория 3)",
+    "stot-repeated exposure": "STOT — многократное воздействие",
+    "based on available data, the classification criteria are not met": "На основании имеющихся данных критерии классификации не выполняются",
+    "results of pbt and vpvb assessment": "Результаты оценки PBT и vPvB",
+    "results of p": "Результаты оценки PBT и vPvB",
+    "china inventory of existing chemical substances": "Китайский реестр существующих химических веществ",
+    "new zealand inventory of chemicals": "Реестр химических веществ Новой Зеландии",
+    "australia. inventory of industrial chemicals (aiic)": "Австралийский реестр промышленных химических веществ (AIIC)",
+    "derived no effect level": "Производный безопасный уровень воздействия",
+    "lethal dose 50%": "Смертельная доза 50%",
+    "effective concentration x%": "Эффективная концентрация X%",
+    "very persistent, very bioaccumulative": "Очень стойкие и очень биоаккумулируемые вещества",
+}
+
+_SDS_REFERENCE_PREFIXES = {
+    "IPCS: The International Chemical Safety Cards (ICSC), website:":
+        "IPCS: Международные карты химической безопасности (ICSC), веб-сайт:",
+    "IARC, website:": "IARC, веб-сайт:",
+    "OECD: The Global Portal to Information on Chemical Substances, website:":
+        "OECD: Глобальный портал информации о химических веществах, веб-сайт:",
+    "CAMEO Chemicals, website:": "CAMEO Chemicals, веб-сайт:",
+    "NLM: ChemIDplus, website:": "NLM: ChemIDplus, веб-сайт:",
+    "EPA: Integrated Risk Information System, website:":
+        "EPA: Интегрированная информационная система оценки рисков, веб-сайт:",
+    "U.S. Department of Transportation: ERG, website:":
+        "Министерство транспорта США: ERG, веб-сайт:",
+    "Germany GESTIS-database on hazard substance, website:":
+        "Немецкая база данных GESTIS по опасным веществам, веб-сайт:",
+}
+
+_REPAIR_ACRONYMS = {
+    "acgih", "adr", "aiic", "cas", "cfr", "dgr", "dn", "dsl", "ec",
+    "echa", "einecs", "encs", "gbz", "ghs", "iata", "iarc", "icao",
+    "iecsc", "imdg", "keci", "msds", "niosh", "nzioc", "ntp", "oecd",
+    "osha", "pbt", "piccs", "reach", "sds", "stot", "tsca", "un",
+    "vpvb",
+}
+
+
+def _normalized_repair_text(text: str) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    return compact.lstrip("|• ").casefold()
+
+
+def _sds_deterministic_translation(text: str) -> str | None:
+    normalized = _normalized_repair_text(text)
+    exact = _SDS_EXACT_TRANSLATIONS.get(normalized)
+    if exact is not None:
+        return exact
+
+    compact = re.sub(r"\s+", " ", text).strip()
+    for source_prefix, target_prefix in _SDS_REFERENCE_PREFIXES.items():
+        if compact.casefold().startswith(source_prefix.casefold()):
+            return target_prefix + compact[len(source_prefix):]
+
+    fire_source = (
+        "as in any fire, wear self-contained breathing apparatus"
+        "（msha/niosh approved or equivalent) and full protective gear."
+    )
+    if normalized == fire_source:
+        return (
+            "Как и при любом пожаре, используйте автономный дыхательный аппарат "
+            "(одобренный MSHA/NIOSH или эквивалентный) и полный комплект "
+            "защитного снаряжения."
+        )
+    return None
+
+
+def _should_repair_line(text: str) -> bool:
+    """Recognise source prose without reprocessing Russian acronym rows."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if _CJK_SOURCE_RE.search(stripped):
+        return True
+    if re.fullmatch(r"https?://\S+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", stripped):
+        return False
+    if re.search(r"\b(?:CO\.?|LTD\.?|LLC|INC\.?)\s*$", stripped, re.IGNORECASE):
+        return False
+
+    latin_words = re.findall(r"\b[A-Za-z][A-Za-z-]{2,}\b", stripped)
+    if not latin_words:
+        return False
+    cyrillic_words = re.findall(r"\b[А-Яа-яЁё][А-Яа-яЁё-]{2,}\b", stripped)
+    meaningful = [
+        word for word in latin_words
+        if word.casefold() not in _REPAIR_ACRONYMS and not word.isupper()
+    ]
+    if not meaningful:
+        return False
+    if cyrillic_words:
+        return len(meaningful) >= 2 and len(meaningful) > len(cyrillic_words)
+    return should_translate(stripped)
+
+
+def _lines_share_table_row(first: dict, second: dict) -> bool:
+    first_rect = fitz.Rect(first["bbox"])
+    second_rect = fitz.Rect(second["bbox"])
+    overlap = min(first_rect.y1, second_rect.y1) - max(first_rect.y0, second_rect.y0)
+    return overlap >= min(first_rect.height, second_rect.height) * 0.55
+
 
 def _translate_pdf_text(
     text: str,
@@ -70,6 +177,10 @@ def _translate_pdf_text(
     """Quality-first PDF policy with a fast path only for drawing labels."""
     if not should_translate(text):
         return text
+
+    sds_exact = _sds_deterministic_translation(text)
+    if sds_exact is not None:
+        return sds_exact
 
     drawing_exact = _DRAWING_LABELS.get(text.strip().casefold())
     if drawing_exact is not None:
@@ -545,7 +656,7 @@ def _extract_pdf_repair_blocks(page: fitz.Page) -> list[PdfTextBlock]:
                 group[0],
                 rect=rect,
                 text=text,
-                expandable=False,
+                expandable=len(group) == 1,
                 kind="paragraph" if len(group) > 1 else "cell",
             )
             if block is not None:
@@ -555,7 +666,9 @@ def _extract_pdf_repair_blocks(page: fitz.Page) -> list[PdfTextBlock]:
         for line in lines:
             spans = line.get("spans", [])
             text = "".join(span.get("text", "") for span in spans).strip()
-            if spans and "bbox" in line and should_translate(text):
+            if spans and "bbox" in line and _should_repair_line(text):
+                if group and _lines_share_table_row(group[-1], line):
+                    flush_group()
                 group.append(line)
             else:
                 flush_group()
@@ -607,16 +720,28 @@ def _insert_translated_text(
     # Последняя попытка в слегка увеличенной области, не выходящей за страницу.
     fallback_rect = _expanded_rect(block.rect, page.rect, margin=2.5)
     if block.expandable and block.rotation == 0:
-        # Drawing labels and TOC rows usually have free horizontal space, but
-        # their extracted bbox ends exactly at the last source glyph.
-        fallback_rect.x1 = min(
-            page.rect.x1 - 1.0,
-            max(fallback_rect.x1, block.rect.x0 + 120.0, block.rect.x1 + block.rect.width),
-        )
-        fallback_rect.y1 = min(
-            page.rect.y1 - 1.0,
-            max(fallback_rect.y1, block.rect.y1 + block.rect.height * 0.8),
-        )
+        if block.kind.startswith("schematic"):
+            # Drawing labels have free horizontal space around the source.
+            fallback_rect.x1 = min(
+                page.rect.x1 - 1.0,
+                max(
+                    fallback_rect.x1,
+                    block.rect.x0 + 120.0,
+                    block.rect.x1 + block.rect.width,
+                ),
+            )
+            fallback_rect.y1 = min(
+                page.rect.y1 - 1.0,
+                max(fallback_rect.y1, block.rect.y1 + block.rect.height * 0.8),
+            )
+        else:
+            # A table cell may use the whitespace after the extracted glyphs,
+            # but expansion is capped so it cannot reach the next column.
+            extra_width = min(100.0, max(20.0, block.rect.width * 0.65))
+            fallback_rect.x1 = min(
+                page.rect.x1 - 1.0,
+                max(fallback_rect.x1, block.rect.x1 + extra_width),
+            )
     result = page.insert_textbox(
         fallback_rect,
         text,
