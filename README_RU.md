@@ -1,8 +1,14 @@
-# PDFMathTranslate WLL v0.6.4
+# PDFMathTranslate WLL v0.6.5
 
 Windows-приложение для технического перевода PDF и DOCX на русский язык.
 
-Установщик без ZIP: [PDFMathTranslate_WLL_Setup_v0_6_4.exe](https://github.com/aguljaev-cell/wllgroup/releases/download/v0.6.4/PDFMathTranslate_WLL_Setup_v0_6_4.exe)
+Установщик без ZIP: [PDFMathTranslate_WLL_Setup_v0_6_5.exe](https://github.com/aguljaev-cell/wllgroup/releases/download/v0.6.5/PDFMathTranslate_WLL_Setup_v0_6_5.exe)
+
+## Что изменилось в v0.6.5
+
+- Режим доделывания больше не принимает части URL и e-mail за непереведённый английский текст.
+- Русские строки со ссылками и официальными названиями справочных баз не переводятся повторно.
+- Полностью готовый PDF распознаётся как завершённый и сохраняется без пересборки и изменения байтов.
 
 ## Что изменилось в v0.6.4
 

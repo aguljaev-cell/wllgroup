@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,10 +147,24 @@ def _should_repair_line(text: str) -> bool:
     if re.search(r"\b(?:CO\.?|LTD\.?|LLC|INC\.?)\s*$", stripped, re.IGNORECASE):
         return False
 
-    latin_words = re.findall(r"\b[A-Za-z][A-Za-z-]{2,}\b", stripped)
+    # URL and e-mail components (``website``, domain names, paths) are not
+    # source prose.  Removing them before language detection prevents a
+    # completed Russian SDS from being selected for repair again merely
+    # because its reference list contains Latin web addresses.
+    language_sample = re.sub(r"https?://\S+", " ", stripped, flags=re.IGNORECASE)
+    language_sample = re.sub(
+        r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+        " ",
+        language_sample,
+    )
+
+    latin_words = re.findall(r"\b[A-Za-z][A-Za-z-]{2,}\b", language_sample)
     if not latin_words:
         return False
-    cyrillic_words = re.findall(r"\b[А-Яа-яЁё][А-Яа-яЁё-]{2,}\b", stripped)
+    cyrillic_words = re.findall(
+        r"\b[А-Яа-яЁё][А-Яа-яЁё-]{2,}\b",
+        language_sample,
+    )
     meaningful = [
         word for word in latin_words
         if word.casefold() not in _REPAIR_ACRONYMS and not word.isupper()
@@ -158,7 +173,7 @@ def _should_repair_line(text: str) -> bool:
         return False
     if cyrillic_words:
         return len(meaningful) >= 2 and len(meaningful) > len(cyrillic_words)
-    return should_translate(stripped)
+    return should_translate(language_sample)
 
 
 def _lines_share_table_row(first: dict, second: dict) -> bool:
@@ -1182,7 +1197,14 @@ def translate_pdf(
                 ),
             )
 
-        _save_final_pdf(doc, destination)
+        if repair_mode and processed_blocks == 0:
+            # Repair is deliberately idempotent: when no source fragment was
+            # replaced, return the original bytes instead of needlessly
+            # rebuilding every PDF object through checkpoint files.
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        else:
+            _save_final_pdf(doc, destination)
         _discard_checkpoint(partial, state_path)
     finally:
         doc.close()

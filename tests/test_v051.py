@@ -35,7 +35,7 @@ from translator import (
 class VersionAndConfigTests(unittest.TestCase):
     def test_lightweight_model_is_configured(self) -> None:
         config = AppConfig()
-        self.assertEqual(APP_VERSION, "0.6.4")
+        self.assertEqual(APP_VERSION, "0.6.5")
         self.assertIn("translategemma-4b-it", config.model_filename)
         self.assertEqual(config.model_size, 2_489_909_760)
         self.assertLessEqual(config.request_timeout, 300)
@@ -123,6 +123,25 @@ class TranslationOutputSafetyTests(unittest.TestCase):
             _should_repair_line("PENGCHEN NEW MATERIAL TECHNOLOGY CO., LTD.")
         )
         self.assertTrue(_should_repair_line("Name of the company"))
+
+    def test_repair_ignores_russian_reference_rows_with_urls(self) -> None:
+        self.assertFalse(
+            _should_repair_line(
+                "IPCS: Международные карты химической безопасности (ICSC), "
+                "веб-сайт: http://www.ilo.org/dyn/icsc/showcard.home"
+            )
+        )
+        self.assertFalse(
+            _should_repair_line(
+                "CAMEO Chemicals, веб-сайт: https://cameochemicals.noaa.gov/"
+            )
+        )
+        self.assertFalse(
+            _should_repair_line(
+                "Министерство транспорта США: ERG, веб-сайт: "
+                "https://www.phmsa.dot.gov/hazmat/erg/emergency-response-guidebook-erg"
+            )
+        )
 
     def test_repair_splits_side_by_side_table_cells(self) -> None:
         page = Mock()
@@ -727,6 +746,34 @@ class PdfCheckpointTests(unittest.TestCase):
 
             self.assertEqual(inputs, ["Mold height limit bwd"])
             self.assertTrue(destination.exists())
+
+    def test_repair_mode_keeps_completed_pdf_byte_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "translated.pdf"
+            destination = root / "repaired.pdf"
+            doc = fitz.open()
+            page = doc.new_page()
+            page.insert_text((72, 72), "Русский текст уже готов")
+            page.insert_text(
+                (72, 100),
+                "IPCS: русский справочник, сайт: https://www.ilo.org/",
+            )
+            doc.save(str(source))
+            doc.close()
+
+            with patch("processors._translate_pdf_text") as translate:
+                report = translate_pdf(
+                    source,
+                    destination,
+                    AppConfig(),
+                    lambda value, message: None,
+                    repair_mode=True,
+                )
+
+            translate.assert_not_called()
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertIn("Обработано элементов: 0", report.read_text(encoding="utf-8"))
 
 
 class WorkerReportSignalTests(unittest.TestCase):
