@@ -26,7 +26,7 @@ private const val API_BASE_URL = "https://YOUR-WORLDLOGICLINE-API"
 
 @Composable
 private fun WorldLogicLineApp(store: MemoryStore) {
-    var messages by remember { mutableStateOf(store.load().toList()) }
+    var messages by remember { mutableStateOf(store.load()) }
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -45,14 +45,16 @@ private fun WorldLogicLineApp(store: MemoryStore) {
                 Button(enabled = input.isNotBlank() && !sending, onClick = {
                     val text = input.trim()
                     input = ""
-                    messages = messages.toMutableList().apply { add(ChatMessage("user", text)) }
-                    store.save(messages)
+                    val updated = messages.toMutableList().apply { add(ChatMessage("user", text)) }
+                    messages = updated
+                    store.save(updated)
                     sending = true
                     scope.launch {
                         val reply = runCatching { AssistantApi(API_BASE_URL).send(text) }
                             .getOrElse { "Не удалось связаться с AI-сервером: ${it.message ?: "неизвестная ошибка"}" }
-                        messages = messages.toMutableList().apply { add(ChatMessage("assistant", reply)) }
-                        store.save(messages)
+                        val withReply = messages.toMutableList().apply { add(ChatMessage("assistant", reply)) }
+                        messages = withReply
+                        store.save(withReply)
                         sending = false
                     }
                 }) { Text(if (sending) "…" else "➤") }
