@@ -7,7 +7,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class AssistantApi(private val baseUrl: String) {
-    suspend fun send(message: String, userId: String): String = withContext(Dispatchers.IO) {
+    suspend fun send(message: String): String = withContext(Dispatchers.IO) {
         require(baseUrl.isNotBlank() && !baseUrl.contains("YOUR-WORLDLOGICLINE-API")) {
             "AI server address is not configured"
         }
@@ -15,10 +15,10 @@ class AssistantApi(private val baseUrl: String) {
         try {
             connection.requestMethod = "POST"
             connection.connectTimeout = 15000
-            connection.readTimeout = 60000
+            connection.readTimeout = 120000
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
-            val body = "{\"user_id\":${json(userId)},\"message\":${json(message)}}"
+            val body = JSONObject().put("message", message).toString()
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
@@ -29,6 +29,4 @@ class AssistantApi(private val baseUrl: String) {
             connection.disconnect()
         }
     }
-
-    private fun json(value: String) = JSONObject.quote(value)
 }
