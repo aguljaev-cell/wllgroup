@@ -6,3 +6,4 @@ certifi==2025.1.31
 pyinstaller==6.11.1
 ctranslate2==4.8.1
 sentencepiece==0.2.2
+openai>=1.99.0
