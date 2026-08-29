@@ -1,8 +1,11 @@
 name: Build WorldLogicLine Assistant
+
 on:
   workflow_dispatch:
   push:
-    paths: ['android_ai_assistant/**']
+    paths:
+      - 'android_ai_assistant/**'
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,15 +19,12 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
-      - name: Install SDK
-        run: yes | sdkmanager --licenses >/dev/null || true
-      - name: Generate Gradle wrapper
-        run: gradle wrapper --gradle-version 8.10.2
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Build APK
-        run: ./gradlew assembleDebug --stacktrace
-      - name: Package APK
-        run: mkdir -p dist && cp app/build/outputs/apk/debug/app-debug.apk dist/WorldLogicLine-Assistant-debug.apk && cd dist && zip -j WorldLogicLine-Assistant.zip WorldLogicLine-Assistant-debug.apk
-      - uses: actions/upload-artifact@v4
+        run: gradle --no-daemon assembleDebug --stacktrace
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
           name: WorldLogicLine-Assistant
-          path: android_ai_assistant/dist/WorldLogicLine-Assistant.zip
+          path: android_ai_assistant/app/build/outputs/apk/debug/app-debug.apk
