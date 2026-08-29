@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: wll_assistant
+      POSTGRES_USER: wll
+      POSTGRES_PASSWORD: change-me-in-production
+    volumes:
+      - wll_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  agent:
+    image: letta/letta:latest
+    depends_on:
+      - postgres
+    environment:
+      LETTA_PG_URI: postgresql://wll:change-me-in-production@postgres:5432/wll_assistant
+    ports:
+      - "8283:8283"
+
+volumes:
+  wll_pgdata:
