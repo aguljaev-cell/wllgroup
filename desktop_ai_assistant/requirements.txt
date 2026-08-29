@@ -1,0 +1,2 @@
+# No third-party Python packages required for the core app.
+# Python 3.10+ with Tkinter is recommended.
