@@ -26,7 +26,7 @@ private const val API_BASE_URL = "https://YOUR-WORLDLOGICLINE-API"
 
 @Composable
 private fun WorldLogicLineApp(store: MemoryStore) {
-    var messages by remember { mutableStateOf(store.load()) }
+    var messages by remember { mutableStateOf(store.load().toList()) }
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -35,7 +35,9 @@ private fun WorldLogicLineApp(store: MemoryStore) {
         Column(Modifier.fillMaxSize().padding(pad).padding(12.dp)) {
             if (messages.isEmpty()) Text("WorldLogicLine Assistant готов. Чем помочь?", Modifier.padding(8.dp))
             LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-                items(messages) { m -> Text(if (m.role == "user") "Вы: ${m.text}" else "Assistant: ${m.text}", Modifier.padding(vertical = 8.dp)) }
+                items(messages) { m ->
+                    Text(if (m.role == "user") "Вы: ${m.text}" else "Assistant: ${m.text}", Modifier.padding(vertical = 8.dp))
+                }
             }
             Row(Modifier.fillMaxWidth()) {
                 OutlinedTextField(value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f), enabled = !sending, placeholder = { Text("Напишите сообщение...") })
@@ -47,7 +49,7 @@ private fun WorldLogicLineApp(store: MemoryStore) {
                     store.save(messages)
                     sending = true
                     scope.launch {
-                        val reply = runCatching { AssistantApi(API_BASE_URL).send(text, "local-user") }
+                        val reply = runCatching { AssistantApi(API_BASE_URL).send(text) }
                             .getOrElse { "Не удалось связаться с AI-сервером: ${it.message ?: "неизвестная ошибка"}" }
                         messages = messages.toMutableList().apply { add(ChatMessage("assistant", reply)) }
                         store.save(messages)
