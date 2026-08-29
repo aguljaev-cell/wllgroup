@@ -22,6 +22,8 @@ class MainActivity : ComponentActivity() {
 
 data class ChatMessage(val role: String, val text: String)
 
+private const val API_BASE_URL = "https://YOUR-WORLDLOGICLINE-API"
+
 @Composable
 private fun WorldLogicLineApp(store: MemoryStore) {
     var messages by remember { mutableStateOf(store.load()) }
@@ -39,11 +41,17 @@ private fun WorldLogicLineApp(store: MemoryStore) {
                 OutlinedTextField(value = input, onValueChange = { input = it }, modifier = Modifier.weight(1f), enabled = !sending, placeholder = { Text("Напишите сообщение...") })
                 Spacer(Modifier.width(8.dp))
                 Button(enabled = input.isNotBlank() && !sending, onClick = {
-                    val text = input.trim(); input = ""
-                    messages = messages.toMutableList().apply { add(ChatMessage("user", text)) }; store.save(messages); sending = true
+                    val text = input.trim()
+                    input = ""
+                    messages = messages.toMutableList().apply { add(ChatMessage("user", text)) }
+                    store.save(messages)
+                    sending = true
                     scope.launch {
-                        val reply = runCatching { AssistantApi("https://YOUR-WORLDLOGICLINE-API").send(text, "local-user") }.getOrElse { "Не удалось связаться с AI-сервером: ${it.message ?: "неизвестная ошибка"}" }
-                        messages = messages.toMutableList().apply { add(ChatMessage("assistant", reply)) }; store.save(messages); sending = false
+                        val reply = runCatching { AssistantApi(API_BASE_URL).send(text, "local-user") }
+                            .getOrElse { "Не удалось связаться с AI-сервером: ${it.message ?: "неизвестная ошибка"}" }
+                        messages = messages.toMutableList().apply { add(ChatMessage("assistant", reply)) }
+                        store.save(messages)
+                        sending = false
                     }
                 }) { Text(if (sending) "…" else "➤") }
             }
