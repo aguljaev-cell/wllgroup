@@ -6,16 +6,25 @@ import org.json.JSONObject
 
 class MemoryStore(context: Context) {
     private val prefs = context.getSharedPreferences("worldlogicline_memory", Context.MODE_PRIVATE)
-    fun load(): MutableList<ChatMessage> = runCatching {
-        val a = JSONArray(prefs.getString("messages", "[]"))
-        MutableList(a.length()) { i ->
-            val o = a.getJSONObject(i)
-            ChatMessage(o.getString("role"), o.getString("text"))
+
+    fun load(): List<ChatMessage> = runCatching {
+        val json = prefs.getString("messages", "[]") ?: "[]"
+        val array = JSONArray(json)
+        buildList(array.length()) {
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val role = item.optString("role")
+                val text = item.optString("text")
+                if (role.isNotBlank() && text.isNotBlank()) add(ChatMessage(role, text))
+            }
         }
-    }.getOrElse { mutableListOf() }
+    }.getOrDefault(emptyList())
+
     fun save(messages: List<ChatMessage>) {
-        val a = JSONArray()
-        messages.forEach { a.put(JSONObject().put("role", it.role).put("text", it.text)) }
-        prefs.edit().putString("messages", a.toString()).apply()
+        val array = JSONArray()
+        messages.forEach { message ->
+            array.put(JSONObject().put("role", message.role).put("text", message.text))
+        }
+        prefs.edit().putString("messages", array.toString()).apply()
     }
 }
