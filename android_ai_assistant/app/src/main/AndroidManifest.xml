@@ -4,7 +4,7 @@
         android:label="WorldLogicLine Assistant"
         android:allowBackup="true"
         android:supportsRtl="true">
-        <activity android:name="com.memoryai.assistant.MainActivity" android:exported="true">
+        <activity android:name="com.worldlogicline.assistant.MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
