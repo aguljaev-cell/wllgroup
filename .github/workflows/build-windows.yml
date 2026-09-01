@@ -32,11 +32,8 @@ jobs:
             'config.py',
             '__init__.py'
           )
-
           foreach ($file in $required) {
-            if (-not (Test-Path $file)) {
-              throw "Required file is missing: $file"
-            }
+            if (-not (Test-Path $file)) { throw "Required file is missing: $file" }
           }
 
       - name: Adapt imports to flat repository structure
@@ -44,33 +41,19 @@ jobs:
         run: |
           @'
           from main import main
-
           if __name__ == "__main__":
               main()
           '@ | Set-Content -Path run.py -Encoding UTF8
-
-          $pythonFiles = @(
-            'main.py',
-            'model_runtime.py',
-            'processors.py',
-            'translator.py',
-            'worker.py',
-            'config.py'
-          )
-
+          $pythonFiles = @('main.py','model_runtime.py','processors.py','translator.py','worker.py','config.py')
           foreach ($file in $pythonFiles) {
             $content = Get-Content $file -Raw
-
             $content = $content.Replace('from app.', 'from ')
             $content = $content.Replace('import app.', 'import ')
-
             $content = $content -replace '(?m)^(\s*)from\s+\.(\w+)\s+import\s+', '$1from $2 import '
             $content = $content -replace '(?m)^(\s*)from\s+\.\s+import\s+(\w+)', '$1import $2'
             $content = $content -replace '(?m)^(\s*)import\s+\.(\w+)', '$1import $2'
-
             Set-Content -Path $file -Value $content -Encoding UTF8
           }
-
           $remaining = Select-String -Path *.py -Pattern '^\s*(from|import)\s+\.' -AllMatches
           if ($remaining) {
             $remaining | ForEach-Object { Write-Host $_.Line }
@@ -99,137 +82,68 @@ jobs:
             'Authorization' = "Bearer $env:GITHUB_TOKEN"
             'X-GitHub-Api-Version' = '2022-11-28'
           }
-          $release = Invoke-RestMethod `
-            -Headers $headers `
-            -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10369'
-
-          $vulkan = $release.assets | Where-Object {
-            $_.name -match 'bin-win-vulkan-x64\.zip$'
-          } | Select-Object -First 1
-
-          $cpu = $release.assets | Where-Object {
-            $_.name -match 'bin-win-cpu-x64\.zip$'
-          } | Select-Object -First 1
-
-          if (-not $vulkan) {
-            throw 'Official llama.cpp Windows Vulkan archive was not found'
-          }
-          if (-not $cpu) {
-            throw 'Official llama.cpp Windows CPU archive was not found'
-          }
-
-          New-Item -ItemType Directory -Force `
-            vendor/llama/vulkan, vendor/llama/cpu, runtime-temp | Out-Null
-
-          Invoke-WebRequest `
-            -Headers $headers `
-            -Uri $vulkan.browser_download_url `
-            -OutFile runtime-temp/vulkan.zip
-
-          Invoke-WebRequest `
-            -Headers $headers `
-            -Uri $cpu.browser_download_url `
-            -OutFile runtime-temp/cpu.zip
-
+          $release = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10369'
+          $vulkan = $release.assets | Where-Object { $_.name -match 'bin-win-vulkan-x64\.zip$' } | Select-Object -First 1
+          $cpu = $release.assets | Where-Object { $_.name -match 'bin-win-cpu-x64\.zip$' } | Select-Object -First 1
+          if (-not $vulkan) { throw 'Official llama.cpp Windows Vulkan archive was not found' }
+          if (-not $cpu) { throw 'Official llama.cpp Windows CPU archive was not found' }
+          New-Item -ItemType Directory -Force vendor/llama/vulkan, vendor/llama/cpu, runtime-temp | Out-Null
+          Invoke-WebRequest -Headers $headers -Uri $vulkan.browser_download_url -OutFile runtime-temp/vulkan.zip
+          Invoke-WebRequest -Headers $headers -Uri $cpu.browser_download_url -OutFile runtime-temp/cpu.zip
           Expand-Archive runtime-temp/vulkan.zip runtime-temp/vulkan -Force
           Expand-Archive runtime-temp/cpu.zip runtime-temp/cpu -Force
-
-          $vulkanServer = Get-ChildItem runtime-temp/vulkan -Recurse `
-            -Filter llama-server.exe | Select-Object -First 1
-          $cpuServer = Get-ChildItem runtime-temp/cpu -Recurse `
-            -Filter llama-server.exe | Select-Object -First 1
-
+          $vulkanServer = Get-ChildItem runtime-temp/vulkan -Recurse -Filter llama-server.exe | Select-Object -First 1
+          $cpuServer = Get-ChildItem runtime-temp/cpu -Recurse -Filter llama-server.exe | Select-Object -First 1
           if (-not $vulkanServer) { throw 'Vulkan llama-server.exe not found' }
           if (-not $cpuServer) { throw 'CPU llama-server.exe not found' }
-
-          Copy-Item "$($vulkanServer.Directory.FullName)\*" `
-            vendor/llama/vulkan -Recurse -Force
-          Copy-Item "$($cpuServer.Directory.FullName)\*" `
-            vendor/llama/cpu -Recurse -Force
-
-          Write-Host "llama.cpp release: $($release.tag_name)"
-          Write-Host "Vulkan asset: $($vulkan.name)"
-          Write-Host "CPU asset: $($cpu.name)"
+          Copy-Item "$($vulkanServer.Directory.FullName)\*" vendor/llama/vulkan -Recurse -Force
+          Copy-Item "$($cpuServer.Directory.FullName)\*" vendor/llama/cpu -Recurse -Force
 
       - name: Download compact OPUS-MT emergency translator
         shell: pwsh
         run: |
           $url = 'https://huggingface.co/ordois/opus-mt-en-ru-ctranslate2-int8/resolve/main/opus-mt-en-ru-ctranslate2-int8.zip?download=true'
           $expected = 'f4c3ab9becb25549673ae407c5db73f86bcf57719426e497c592415a5b512bcd'
-
-          New-Item -ItemType Directory -Force `
-            vendor/opus, runtime-temp/opus | Out-Null
-          Invoke-WebRequest `
-            -Headers @{ 'User-Agent' = 'PDFMathTranslate-WLL' } `
-            -Uri $url `
-            -OutFile runtime-temp/opus.zip
-
+          New-Item -ItemType Directory -Force vendor/opus, runtime-temp/opus | Out-Null
+          Invoke-WebRequest -Headers @{ 'User-Agent' = 'PDFMathTranslate-WLL' } -Uri $url -OutFile runtime-temp/opus.zip
           $actual = (Get-FileHash runtime-temp/opus.zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $expected) {
-            throw "OPUS-MT archive checksum mismatch: $actual"
-          }
-
+          if ($actual -ne $expected) { throw "OPUS-MT archive checksum mismatch: $actual" }
           Expand-Archive runtime-temp/opus.zip runtime-temp/opus -Force
-          $model = Get-ChildItem runtime-temp/opus -Recurse -Filter model.bin |
-            Select-Object -First 1
+          $model = Get-ChildItem runtime-temp/opus -Recurse -Filter model.bin | Select-Object -First 1
           if (-not $model) { throw 'OPUS-MT model.bin not found' }
           Copy-Item "$($model.Directory.FullName)\*" vendor/opus -Recurse -Force
-
           foreach ($file in @('model.bin', 'source.spm', 'target.spm')) {
-            if (-not (Test-Path "vendor/opus/$file")) {
-              throw "Required OPUS-MT file is missing: $file"
-            }
+            if (-not (Test-Path "vendor/opus/$file")) { throw "Required OPUS-MT file is missing: $file" }
           }
 
       - name: Run syntax checks
         shell: pwsh
-        run: |
-          python -m compileall -q `
-            run.py `
-            main.py `
-            model_runtime.py `
-            processors.py `
-            translator.py `
-            worker.py `
-            config.py
+        run: python -m compileall -q run.py main.py model_runtime.py processors.py translator.py worker.py config.py
 
       - name: Run unit tests
         shell: pwsh
-        run: |
-          python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -v
 
       - name: Build application
         shell: pwsh
-        run: |
-          pyinstaller `
-            --noconfirm `
-            --clean `
-            PDFMathTranslate_WLL.spec
+        run: pyinstaller --noconfirm --clean PDFMathTranslate_WLL.spec
 
       - name: Verify application build
         shell: pwsh
         run: |
-          if (-not (Test-Path 'dist/PDFMathTranslate_WLL.exe')) {
-            throw 'PyInstaller did not create dist/PDFMathTranslate_WLL.exe'
-          }
+          if (-not (Test-Path 'dist/PDFMathTranslate_WLL.exe')) { throw 'PyInstaller did not create dist/PDFMathTranslate_WLL.exe' }
 
       - name: Install Inno Setup
         shell: pwsh
-        run: |
-          choco install innosetup --no-progress -y
+        run: choco install innosetup --no-progress -y
 
       - name: Create installer script
         shell: pwsh
         run: |
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            build, release |
-            Out-Null
-
+          New-Item -ItemType Directory -Force build, release | Out-Null
           @'
           #define MyAppName "PDFMathTranslate WLL"
-          #define MyAppVersion "0.6.5"
+          #define MyAppVersion "0.6.6"
           #define MyAppPublisher "WorldLogicLine"
           #define MyAppExeName "PDFMathTranslate_WLL.exe"
 
@@ -241,7 +155,7 @@ jobs:
           DefaultDirName={localappdata}\Programs\PDFMathTranslate WLL
           DefaultGroupName={#MyAppName}
           OutputDir=..\release
-          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_5
+          OutputBaseFilename=PDFMathTranslate_WLL_Setup_v0_6_6
           Compression=lzma2/ultra64
           SolidCompression=yes
           WizardStyle=modern
@@ -262,39 +176,25 @@ jobs:
 
           [Run]
           Filename: "{app}\{#MyAppExeName}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent
-          '@ | Set-Content `
-            -Path build/installer.iss `
-            -Encoding UTF8
+          '@ | Set-Content -Path build/installer.iss -Encoding UTF8
 
       - name: Build installer
         shell: pwsh
-        run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            build\installer.iss
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" build\installer.iss'
 
       - name: Create checksums
         shell: pwsh
         run: |
-          $file = Get-Item `
-            release/PDFMathTranslate_WLL_Setup_v0_6_5.exe
-
-          $hash = (
-            Get-FileHash `
-              $file.FullName `
-              -Algorithm SHA256
-          ).Hash.ToLower()
-
-          "$hash  $($file.Name)" |
-            Out-File `
-              release/SHA256SUMS.txt `
-              -Encoding ascii
+          $file = Get-Item release/PDFMathTranslate_WLL_Setup_v0_6_6.exe
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($file.Name)" | Out-File release/SHA256SUMS.txt -Encoding ascii
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: PDFMathTranslate_WLL_Windows_v0_6_5
+          name: PDFMathTranslate_WLL_Windows_v0_6_6
           path: |
-            release/PDFMathTranslate_WLL_Setup_v0_6_5.exe
+            release/PDFMathTranslate_WLL_Setup_v0_6_6.exe
             release/SHA256SUMS.txt
           retention-days: 14
 
@@ -303,23 +203,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = 'v0.6.5'
+          $tag = 'v0.6.6'
           $repository = $env:GITHUB_REPOSITORY
-          $assets = @(
-            'release/PDFMathTranslate_WLL_Setup_v0_6_5.exe',
-            'release/SHA256SUMS.txt'
-          )
-
+          $assets = @('release/PDFMathTranslate_WLL_Setup_v0_6_6.exe','release/SHA256SUMS.txt')
           gh release view $tag --repo $repository *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $assets `
-              --repo $repository `
-              --clobber
-          }
-          else {
-            gh release create $tag $assets `
-              --repo $repository `
-              --target $env:GITHUB_SHA `
-              --title 'PDFMathTranslate WLL 0.6.5' `
-              --notes 'Режим доделывания стал идемпотентным: готовый русский PDF больше не пересобирается и не изменяется. URL, e-mail и русские строки с названиями справочных баз не принимаются за остаточный английский текст.'
+            gh release upload $tag $assets --repo $repository --clobber
+          } else {
+            gh release create $tag $assets --repo $repository --target $env:GITHUB_SHA --title 'PDFMathTranslate WLL 0.6.6' --notes 'Улучшен контроль качества технического перевода: детерминированные переводы коротких заголовков, расширенный технический глоссарий и повторный проход при остаточном EN/CN тексте.'
           }
